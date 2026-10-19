@@ -4,7 +4,7 @@ use serenity::all::*;
 use tokio::time::{Instant, timeout_at};
 
 use super::Context;
-use crate::domain::{Actor, Balance, GuildId as DomainGuildId, UserId as DomainUserId};
+use crate::domain::{Actor, Balance, GuildId as DomainGuildId, NotAmount, UserId as DomainUserId};
 use crate::infrastructure::Error;
 
 pub(super) async fn actor(ctx: Context<'_>, supplied: Option<&str>) -> Result<Actor, Error> {
@@ -18,11 +18,23 @@ pub(super) async fn adjustment_target(
     user: UserId,
 ) -> Result<DomainUserId, Error> {
     if !actor.can_manage_not() {
-        return Err("残高調整には対象サーバーの管理者権限が必要です。".into());
+        return Err("この操作には対象サーバーの管理者権限が必要です。".into());
     }
-    http.get_member(GuildId::new(actor.guild_id().get()), user)
+    member_target(http, actor, user).await
+}
+
+pub(super) async fn member_target(
+    http: &Http,
+    actor: Actor,
+    user: UserId,
+) -> Result<DomainUserId, Error> {
+    let member = http
+        .get_member(GuildId::new(actor.guild_id().get()), user)
         .await
         .map_err(|_| "対象ユーザーの所属を確認できませんでした。")?;
+    if member.user.id != user || member.guild_id.get() != actor.guild_id().get() {
+        return Err("対象ユーザーの所属を確認できませんでした。".into());
+    }
     Ok(DomainUserId::try_from(user.get())?)
 }
 
@@ -34,6 +46,11 @@ pub(super) async fn guild_choices(ctx: Context<'_>, query: &str) -> CreateAutoco
         .guilds()
         .into_iter()
         .filter(|id| ctx.guild_id().is_none_or(|current| current == *id))
+        .filter(|id| {
+            ctx.command().name != "add"
+                || DomainGuildId::try_from(id.get())
+                    .is_ok_and(|id| ctx.data().shop_channels.contains_key(&id))
+        })
         .filter_map(|id| cache.guild(id).map(|guild| (id, guild.name.clone())))
         .filter(|(id, name)| {
             name.to_lowercase().contains(&query) || id.to_string().starts_with(&query)
@@ -45,7 +62,10 @@ pub(super) async fn guild_choices(ctx: Context<'_>, query: &str) -> CreateAutoco
     let mut choices = Vec::new();
     for (id, name) in guilds {
         match timeout_at(deadline, authenticate(ctx.http(), id, ctx.author().id)).await {
-            Ok(Ok(actor)) if ctx.command().name != "adjust" || actor.can_manage_not() => {
+            Ok(Ok(actor))
+                if !matches!(ctx.command().name.as_ref(), "adjust" | "refund")
+                    || actor.can_manage_not() =>
+            {
                 choices.push(AutocompleteChoice::new(
                     name.chars().take(100).collect::<String>(),
                     id.to_string(),
@@ -91,7 +111,14 @@ pub(super) fn parse_balance(value: &str) -> Result<Balance, &'static str> {
         .ok_or("目標残高が上限を超えています。")
 }
 
-async fn authenticate(
+pub(super) fn parse_amount(value: &str) -> Result<NotAmount, &'static str> {
+    value
+        .parse::<i64>()
+        .map(NotAmount::new)
+        .map_err(|_| "増減額は-9223372036854775808〜9223372036854775807の整数で指定してください。")
+}
+
+pub(super) async fn authenticate(
     http: &Http,
     guild_id: GuildId,
     user_id: UserId,
@@ -108,7 +135,7 @@ async fn authenticate(
     authenticated_actor(&guild, &member, user_id)
 }
 
-fn authenticated_actor(
+pub(super) fn authenticated_actor(
     guild: &PartialGuild,
     member: &Member,
     expected_user: UserId,
@@ -123,3 +150,6 @@ fn authenticated_actor(
         can_manage,
     ))
 }
+
+#[cfg(test)]
+mod tests;

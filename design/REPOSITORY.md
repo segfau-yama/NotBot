@@ -14,16 +14,21 @@ classDiagram
         events
         services
         content
+        roles
     }
     class NotUseCase {
         <<infrastructure>>
         +get_balance(actor) Balance
         +get_ranking(actor, limit) Vec~UserBalance~
         +adjust_balance(actor, user_id, target_balance, request_id) LedgerEntry
+        +adjust_amount(actor, user_id, amount, request_id) LedgerEntry
+        +transfer(actor, recipient, amount, request_id)
+        +grant_reward(actor, reason, request_id, now) Option~LedgerEntry~
     }
     class ShopUseCase {
         <<infrastructure>>
         +create(actor, details, stored_content) ShopItem
+        +create_role(actor, role_id, details) ShopItem
         +find(actor, item_id) ShopItem
         +list(actor) Vec~ShopItem~
         +update(actor, item_id, expected_revision, changes) ShopItem
@@ -32,6 +37,7 @@ classDiagram
         +purchase(actor, quote, now) PurchaseResult
         +find_purchase_by_confirmation(actor, confirmation_id) Option~PurchaseResult~
         +list_purchases(actor) Vec~PurchaseResult~
+        +get_purchase(actor, purchase_id) PurchaseResult
         +get_content_for_purchase(actor, purchase_id) ContentFile
         +refund(actor, purchase_id, request_id) TradeResult
     }
@@ -56,7 +62,7 @@ classDiagram
 
 図のモジュールと処理structはすべて同じインフラ層のもの。操作処理とDBアクセスは `sqlite/`、Discordの入力・認証・返信は `discord/` に配置する。引数・戻り値にはドメインの型を使う。`NotUseCase`・`ShopUseCase` は既存の操作集合の名前を維持し、具体的な `SqliteDatabaseAccess` を受け取る。DB向けの型引数とTraitを介さず、具体型の通常メソッドを使う。`SqliteSession` の図には代表的な操作だけを示す。
 
-I/Oは非同期の `Result<T, ...>` とする。公開・配送は確定後にDiscord処理が行う。P08以降の投稿・配送、P12の報酬・罰則・譲渡、P13のロール操作は、それぞれ必要な工程で追加し、空のTrait・DTO・メソッドは先に作らない。
+I/Oは非同期の `Result<T, ...>` とする。公開・配送は確定後にDiscord処理が行う。P08の出品・公開・再投稿とP09の購入確認・決済・配送・無料再送、P12の報酬・罰則・譲渡、P13のロール登録・販売・照合・復旧は実装済み。空のTrait・DTO・メソッドは作らない。
 
 ## DB操作で守ること
 
@@ -72,7 +78,7 @@ I/Oは非同期の `Result<T, ...>` とする。公開・配送は確定後にDi
 
 - `get_balance`・`get_ranking` は `not_balance` VIEWを照会する。履歴なしは0、負の集計値や整数オーバーフローは不正データ・算術エラーとして扱う。
 - `grant_reward` は既定の報酬額と回数・間隔の条件を判断する。Bot・自己操作の除外に必要な情報はDiscord側の入力変換で渡す。履歴に依存する制限は同じ書き込みセッションで確認する。
-- `penalize` は `-min(100, 現在残高)`、`adjust_balance` は非負の目標残高との差額を追記する。0の追記もイベントの処理済み記録に使う。管理権限を確認する。
+- `adjust_amount` は正負の指定額をそのまま追記し、増減後の残高が負数・整数上限超過なら拒否する。`adjust_balance` は非負の目標残高との差額を追記する。0の追記もイベントの処理済み記録に使う。いずれも管理権限を確認する。
 - `transfer` は100・500・1,000NOTのいずれか。自己譲渡・残高不足を拒否し、送信者・受信者の増減の合計を0にする。
 - `prepare_purchase` は同じサーバー・販売中・自己購入でないこと・未購入・購入可能な残高を確認し、本人・ギルド・商品版・価格・確認ID・期限を持つ `PurchaseQuote` を返す。ここでは課金しない。
 - `purchase` は確認IDによる確定済み結果を先に照合する。初回だけ期限・商品版・価格と最新状態の一致、残高等を再検証する。確認した同額で購入者の負数行と出品者の正数行を追記し、売上の `sale_of` に購入行のIDを渡す。
@@ -82,6 +88,12 @@ I/Oは非同期の `Result<T, ...>` とする。公開・配送は確定後にDi
 - `event_key` は操作種別と依頼IDを含め、譲渡を `:sent`・`:received`、購入・返金を `:buyer`・`:seller` で区別する。処理済みなら依頼の主体・商品・金額と一致する既存の結果を返す。
 
 `NotUseCase` の残高・ランキング・調整を実装している。調整は管理権限を確認した後、`begin_write` → `adjust:{request_id}` の照合 → 現在残高の取得 → 差額の追記 → COMMITの順で行う。`target_balance` は `Balance` 型で受け取り、負数は生成時に拒否する。依頼IDは空白だけの値・制御文字を拒否する。同一キーの対象ユーザー・理由が異なる場合は `UseCaseError::RequestConflict` とする。
+
+`adjust_amount(actor, user_id, amount, request_id)` は管理権限を確認し、`adjust-amount:{request_id}` の元取引の対象・理由・指定額を照合する。未処理なら現在残高へ `NotAmount` をchecked加算し、`ADJUSTMENT` として追記する。照合・残高検証・追記は同じImmediateトランザクションで行い、後続の残高変更後も同じ依頼は元の結果を返す。Discordの管理操作は `/not adjust amount:正負の整数` に統合し、`/not penalize` と固定100 NOTの罰則処理は削除した。旧 `TIMEOUT`・目標残高調整の履歴は書き換えない。
+
+`transfer(actor, recipient, amount, request_id)` は `transfer:{request_id}:sent`・`:received` の両行を照合し、送信・受信の順の `(LedgerEntry, LedgerEntry)` を返す。別の主体・対象・金額へのID再利用を拒否し、片側しかない履歴は `InvalidData` とする。Discordは `/not transfer` から接続し、対象所属をRESTで照合する。
+
+`grant_reward(actor, reason, request_id, now)` は投稿5・リアクション実行1・リアクション受信10・返信受信20 NOTを付与し、サーバー・受取人・種別ごとの60秒間隔と日本時間の日次100回上限を判定する。`reason` はこの4種別だけを許可する。Botで採取した `SystemTime` を使い、時刻用Traitは追加しない。`reward:{reason.code()}:{request_id}` と `reward_event` で付与・見送りを復元し、付与なら `Some(LedgerEntry)`、制限なら `None` を返す。旧仕様の一律1 NOTも正当な保存済み結果として照合し、現在の額で付与し直さない。見送りも確定して記録し、日付変更・再起動後に同じイベントを付与し直さない。処理済み確認・上限・残高検証・取引と結果の追記は同じ書き込みセッション内で行う。Discordの `rewards.rs` はメッセージID、リアクションではメッセージIDと実行者IDを渡し、REST所属確認とBot・Webhook・自己操作の除外を担当する。各受取人の報酬は独立した判断・取引とする。
 
 調整の履歴には目標残高そのものではなく差額を保存するため、再試行時は `get_balance_at_entry` で元取引のIDまでの同一ギルド・ユーザーの履歴をID順に集計し、当時の目標残高を照合する。一致すれば元の `LedgerEntry` を返し、不一致なら `RequestConflict` とする。後続の取引やBot再起動があっても再反映しない。IDは追記順に採番し、上限到達後の追記は拒否する。新しい依頼管理テーブルや目標残高列は追加しない。
 
@@ -114,7 +126,7 @@ P06の `find_purchase_by_confirmation` は確認IDの両キーを照合し、本
 - 商品作成の再試行は固定情報の一意制約、版追加の再試行は期待する版番号と確定済みの内容を照合する。結果不明時に次の版を無条件で追記しない。
 - 理由マスタは初期SQL・運営の管理SQLで、固定コードと表示名の履歴を追記する。現時点では利用者向け操作処理や専用Repositoryを作らない。
 
-作成の入口は `create(actor, details, stored_content)` とする。`StoredContent` は外側の保存処理だけが生成するインフラの保存成功を表す型で、保存した実行者・ギルドとファイル情報を持つ。配置はインフラ共通の `mod.rs` とし、SQLite側とDiscord側で共有する。操作処理は対象の一致と配送サイズを検証し、内部で既存の `NewShopItem` を組み立てる。任意のメタデータだけで未保存のキーを登録する入口を設けない。
+作成の入口は `create(actor, details, stored_content)` とする。`StoredContent` は外側の保存処理だけが生成するインフラの保存成功を表す型で、保存した実行者・ギルドとファイル情報を持つ。配置は `infrastructure/stored_content.rs` とし、`mod.rs` から再公開してSQLite側とDiscord側で共有する。操作処理は対象の一致と配送サイズを検証し、内部で既存の `NewShopItem` を組み立てる。任意のメタデータだけで未保存のキーを登録する入口を設けない。
 
 `find_content_item` はギルド・保存キーから削除済みを含む最新の商品を返す。作成の再試行では、`find_item_revision(..., 1)` で出品者・ファイル情報・初版の名前／説明／価格を照合する。一致すれば現在の商品を返し、不一致は `RequestConflict`。後から変更・削除されていても作成や復活をしない。
 
@@ -124,7 +136,7 @@ P06の `find_purchase_by_confirmation` は確認IDの両キーを照合し、本
 
 ## Discordとの境界と配送
 
-`discord/commands.rs` がPoiseのコマンド定義と操作処理の呼出し、`services.rs` が入力変換・認証・ギルド候補、`events.rs` がイベントと共通のエラー返信を担当する。これらはすべてインフラ内の処理であり、ドメインには変換済みの値と結果だけを置く。購入確認は本人と元のギルドへ結び付け、公開EmbedとDMの確認・配送を分ける。
+`discord/commands.rs` がPoiseのコマンド定義と操作処理の呼出し、`services.rs` が入力変換・認証・ギルド候補、`events.rs` がイベントと共通のエラー返信を担当する。P10の `posting.rs` は添付受信・サーバー選択・フォームを `listings.rs` の既存プレビューと公開処理へ接続する。P11の `management.rs` は `/content` の商品変更・削除・再投稿・返金をP04・P06へ接続し、公開表示の同期を `listings.rs` へ任せる。これらはすべてインフラ内の処理であり、ドメインには変換済みの値と結果だけを置く。購入確認は本人と元のギルドへ結び付け、公開EmbedとDMの確認・配送を分ける。
 
 `discord/` が操作処理を呼び、確定後の結果を使って公開・配送する。ロール操作もインフラのSerenity呼出しで実行し、追加のTraitや循環した所有構造は作らない。
 
@@ -132,6 +144,10 @@ P06の `find_purchase_by_confirmation` は確認IDの両キーを照合し、本
 - ロール付与はCOMMIT後にSerenityで実行する。結果不明なら保有状態を照合して再試行し、DBトランザクション中は外部APIを呼ばない。
 - コンテンツは `get_content_for_purchase` で購入者・同じギルド・未返金を照合し、固定の保存キーを返す。`discord/` がCOMMIT後に添付送信する。送信失敗・結果不明は配送保留と購入IDで案内し、購入一覧から無料で再送できるようにする。自動返金はしない。
 - ロール配送失敗時は従来どおり返金を試み、返金できなければ配送保留として再照合する。コンテンツの返金は認可された明示操作で行う。即時返金の保証には売上保留が別途必要となる。
+
+P13の `create_role` は管理者のみ受け付け、ギルド・ロールIDの既存商品と初版を照合して再試行を復元する。変更・削除・確認価格・購入はコンテンツと同じ操作を使う。`get_purchase` は購入者本人または管理者だけに、未返金の購入・売上・商品を返す。ファイル取得は引き続き購入者本人だけに限定する。
+
+`discord/roles.rs` がSerenityの権限・ロール階層・保有を照合する。未付与を確認した後だけ内部の `refund_role_delivery` を呼び、購入者本人のROLE購入に限定して `refund:role-delivery-{購入ID}:buyer`・`:seller` で元額を返金する。一般ユーザーを管理者Actorへ昇格させない。保有不明なら返金せず、返金不能なら未返金の権利を残す。内部の `list_role_purchases(guild)` は購入・売上・返金を検証し、削除済み商品も含めた未返金ROLE購入を起動時の照合へ渡す。管理者返金ではロール解除を確認してから既存の返金処理を呼び、不成立なら未返金の権利を照合して再付与を試みる。配送・返金・公開の競合は既存の商品単位ロックを共用する。
 - 購入権限は返金されていない購入から判定する。削除後も過去の購入・取得先を参照できる。
 
 ## エラー

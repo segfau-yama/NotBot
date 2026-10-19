@@ -166,6 +166,7 @@ macro_rules! positive_id {
 positive_id!(GuildId, u64);
 positive_id!(UserId, u64);
 positive_id!(ChannelId, u64);
+positive_id!(MessageId, u64);
 positive_id!(RoleId, u64);
 positive_id!(ItemId, i64);
 positive_id!(LedgerEntryId, i64);

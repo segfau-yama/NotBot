@@ -10,6 +10,100 @@ use crate::domain::{Actor, ContentFile, ValidationError};
 
 use crate::infrastructure::{MAX_CONTENT_BYTES, StoredContent};
 
+pub(super) fn validate_attachment(
+    file: &serenity::all::Attachment,
+) -> Result<(), crate::infrastructure::Error> {
+    ContentFile::try_new("preview", &file.filename, file.size.into())?;
+    if u64::from(file.size) > MAX_CONTENT_BYTES || file.filename.len() > 255 {
+        return Err("ファイルは有効な名前で、1バイト〜20 MiBにしてください。".into());
+    }
+    let url = reqwest::Url::parse(&file.url).map_err(|_| "添付URLが不正です。")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("cdn.discordapp.com")
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(url.path().starts_with("/attachments/")
+            || url.path().starts_with("/ephemeral-attachments/"))
+    {
+        return Err("Discordの添付ファイルだけを受け付けます。".into());
+    }
+    Ok(())
+}
+
+pub(super) async fn download_attachment(
+    client: &reqwest::Client,
+    file: &serenity::all::Attachment,
+) -> Result<Vec<u8>, crate::infrastructure::Error> {
+    validate_attachment(file)?;
+    let response = client
+        .get(&file.url)
+        .send()
+        .await
+        .map_err(|_| "添付ファイルを取得できませんでした。")?;
+    read_attachment(response, file.size.into()).await
+}
+
+pub(super) async fn read_attachment(
+    mut response: reqwest::Response,
+    expected: u64,
+) -> Result<Vec<u8>, crate::infrastructure::Error> {
+    if !response.status().is_success() {
+        return Err("添付ファイルを取得できませんでした。".into());
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_CONTENT_BYTES)
+    {
+        return Err(ContentStorageError::TooLarge.into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "添付ファイルの読取りに失敗しました。")?
+    {
+        if bytes.len() as u64 + chunk.len() as u64 > MAX_CONTENT_BYTES {
+            return Err(ContentStorageError::TooLarge.into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() || bytes.len() as u64 != expected {
+        return Err("添付ファイルのサイズが一致しません。".into());
+    }
+    Ok(bytes)
+}
+
+pub(super) async fn read_content(
+    directory: &Path,
+    file: &ContentFile,
+) -> Result<Vec<u8>, crate::infrastructure::Error> {
+    let directory = directory.to_path_buf();
+    let file = file.clone();
+    tokio::task::spawn_blocking(move || -> Result<Vec<u8>, crate::infrastructure::Error> {
+        let directory = fs::canonicalize(directory)?;
+        let path = directory.join(file.key());
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || fs::canonicalize(&path)? != path {
+            return Err(ContentStorageError::UnsafePath.into());
+        }
+        if file.size_bytes() > MAX_CONTENT_BYTES || metadata.len() != file.size_bytes() {
+            return Err("配送できるファイルサイズではありません。".into());
+        }
+        let mut bytes = Vec::new();
+        File::open(path)?
+            .take(MAX_CONTENT_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != file.size_bytes() {
+            return Err("保存済みファイルのサイズが一致しません。".into());
+        }
+        Ok(bytes)
+    })
+    .await
+    .map_err(|_| "コンテンツの読出し処理に失敗しました。")?
+    .map_err(|_| "コンテンツを読み出せませんでした。".into())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ContentStorageError {
     #[error("{0}")]

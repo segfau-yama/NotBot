@@ -1,9 +1,9 @@
 use std::time::{Duration, SystemTime};
 
 use crate::domain::{
-    Actor, ContentFile, ItemDetails, ItemId, ItemTarget, LedgerEntry, LedgerEntryId, LedgerReason,
-    NewLedgerEntry, NewShopItem, NotAmount, PurchaseQuote, PurchaseResult, ShopItem, TradeResult,
-    ValidationError, validate_event_key,
+    Actor, ContentFile, GuildId, ItemDetails, ItemId, ItemTarget, LedgerEntry, LedgerEntryId,
+    LedgerReason, NewLedgerEntry, NewShopItem, NotAmount, PurchaseQuote, PurchaseResult, RoleId,
+    ShopItem, TradeResult, ValidationError, validate_event_key,
 };
 
 use super::{DatabaseError, SqliteDatabaseAccess, SqliteSession};
@@ -180,24 +180,53 @@ impl ShopUseCase {
         actor: Actor,
         purchase_id: LedgerEntryId,
     ) -> Result<ContentFile, UseCaseError> {
+        let purchase = self.get_purchase(actor, purchase_id).await?;
+        if purchase.buyer().user_id() != actor.user_id() {
+            return Err(UseCaseError::PermissionDenied);
+        }
+        let ItemTarget::Content(file) = purchase.item().target() else {
+            return Err(UseCaseError::ItemNotFound);
+        };
+        Ok(file.clone())
+    }
+
+    /// 本人または管理者の未返金購入。削除済み商品も参照する。
+    pub async fn get_purchase(
+        &self,
+        actor: Actor,
+        purchase_id: LedgerEntryId,
+    ) -> Result<PurchaseResult, UseCaseError> {
         let mut session = self.database.begin_read().await?;
         let buyer = session
             .find_entry(actor.guild_id(), purchase_id)
             .await?
             .ok_or(UseCaseError::PurchaseNotFound)?;
-        if buyer.user_id() != actor.user_id() {
+        if buyer.user_id() != actor.user_id() && !actor.can_manage_not() {
             return Err(UseCaseError::PermissionDenied);
         }
         let purchase = load_purchase(&mut session, buyer).await?;
         if refund_state(&mut session, &purchase).await?.is_some() {
             return Err(UseCaseError::AlreadyRefunded);
         }
-        let ItemTarget::Content(file) = purchase.item().target() else {
-            return Err(UseCaseError::ItemNotFound);
-        };
-        let file = file.clone();
         session.commit().await?;
-        Ok(file)
+        Ok(purchase)
+    }
+
+    pub(crate) async fn list_role_purchases(
+        &self,
+        guild: GuildId,
+    ) -> Result<Vec<PurchaseResult>, UseCaseError> {
+        let mut session = self.database.begin_read().await?;
+        let entries = session.list_role_purchase_entries(guild).await?;
+        let mut result = Vec::new();
+        for entry in entries {
+            let purchase = load_purchase(&mut session, entry).await?;
+            if refund_state(&mut session, &purchase).await?.is_none() {
+                result.push(purchase)
+            }
+        }
+        session.commit().await?;
+        Ok(result)
     }
 
     /// NOT管理者の明示操作だけを受け付ける。同じ依頼IDの再試行では元の2行を返す。
@@ -210,6 +239,32 @@ impl ShopUseCase {
         if !actor.can_manage_not() {
             return Err(UseCaseError::PermissionDenied);
         }
+        self.refund_checked(actor, purchase_id, request_id, false)
+            .await
+    }
+
+    /// Discord側が未付与を照合した後にだけ呼ぶ。購入者本人のロール購入に限定する。
+    pub(crate) async fn refund_role_delivery(
+        &self,
+        actor: Actor,
+        purchase_id: LedgerEntryId,
+    ) -> Result<TradeResult, UseCaseError> {
+        self.refund_checked(
+            actor,
+            purchase_id,
+            &format!("role-delivery-{purchase_id}"),
+            true,
+        )
+        .await
+    }
+
+    async fn refund_checked(
+        &self,
+        actor: Actor,
+        purchase_id: LedgerEntryId,
+        request_id: &str,
+        role_delivery: bool,
+    ) -> Result<TradeResult, UseCaseError> {
         validate_event_key(request_id)?;
         let mut session = self.database.begin_write().await?;
         let buyer = session
@@ -217,6 +272,12 @@ impl ShopUseCase {
             .await?
             .ok_or(UseCaseError::PurchaseNotFound)?;
         let purchase = load_purchase(&mut session, buyer).await?;
+        if role_delivery
+            && (purchase.buyer().user_id() != actor.user_id()
+                || !matches!(purchase.item().target(), ItemTarget::Role(_)))
+        {
+            return Err(UseCaseError::PermissionDenied);
+        }
         let buyer_key = format!("refund:{request_id}:buyer");
         let seller_key = format!("refund:{request_id}:seller");
         let buyer = session
@@ -308,6 +369,32 @@ impl ShopUseCase {
         }
         let item = NewShopItem::new(details, ItemTarget::Content(content.file));
         let item = session.append_content_item(actor, item).await?;
+        session.commit().await?;
+        Ok(item)
+    }
+
+    pub async fn create_role(
+        &self,
+        actor: Actor,
+        role: RoleId,
+        details: ItemDetails,
+    ) -> Result<ShopItem, UseCaseError> {
+        if !actor.can_manage_not() {
+            return Err(UseCaseError::PermissionDenied);
+        }
+        let mut session = self.database.begin_write().await?;
+        if let Some(existing) = session.find_role_item(actor.guild_id(), role).await? {
+            let original = session
+                .find_item_revision(actor.guild_id(), existing.id(), 1)
+                .await?
+                .ok_or(DatabaseError::InvalidData)?;
+            if original.seller_id() != actor.user_id() || original.details() != &details {
+                return Err(UseCaseError::RequestConflict);
+            }
+            session.commit().await?;
+            return Ok(existing);
+        }
+        let item = session.append_role_item(actor, role, details).await?;
         session.commit().await?;
         Ok(item)
     }
@@ -495,10 +582,9 @@ async fn validate_purchase(
     if item.is_deleted() {
         return Err(UseCaseError::ItemDeleted);
     }
-    let ItemTarget::Content(file) = item.target() else {
-        return Err(UseCaseError::ItemNotFound);
-    };
-    if file.size_bytes() > MAX_CONTENT_BYTES {
+    if let ItemTarget::Content(file) = item.target()
+        && file.size_bytes() > MAX_CONTENT_BYTES
+    {
         return Err(ValidationError::InvalidFileSize.into());
     }
     if item.seller_id() == actor.user_id() {

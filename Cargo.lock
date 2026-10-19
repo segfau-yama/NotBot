@@ -966,6 +966,7 @@ name = "notbot"
 version = "0.1.0"
 dependencies = [
  "poise",
+ "reqwest",
  "sea-orm",
  "serenity",
  "thiserror 2.0.21",

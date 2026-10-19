@@ -4,9 +4,9 @@ NOTの増減・商品・取引理由を、すべてINSERTで保存するSQLite�
 
 ## テーブルと参照
 
-固定の識別情報・変更履歴・添付ファイル・公開投稿を分けた7テーブルと、照会用の3つのVIEWを使う。
+固定の識別情報・変更履歴・添付ファイル・公開投稿・報酬の処理結果を分けた8テーブルと、照会用の3つのVIEWを使う。
 
-実装SQLは [001_initial.sql](../src/infrastructure/sqlite/001_initial.sql)。起動時に `SqliteDatabaseAccess::open` が適用する。SQLiteの `user_version` に適用版1を記録し、7テーブル・3VIEW・初期値と同じImmediateトランザクションで確定する。ファイルヘッダの版管理であり、業務テーブルの既存行は書き換えない。[SQLiteのuser_version](https://www.sqlite.org/pragma.html#pragma_user_version)
+実装SQLは [001_initial.sql](../src/infrastructure/sqlite/001_initial.sql) と [002_rewards.sql](../src/infrastructure/sqlite/002_rewards.sql)。起動時に `SqliteDatabaseAccess::open` が適用する。現在のSQLiteの `user_version` は2。新規DBは両SQLと版番号を同じImmediateトランザクションで確定し、既存の版1には報酬の処理結果と索引だけを追加する。ファイルヘッダの版管理であり、業務テーブルの既存行は書き換えない。[SQLiteのuser_version](https://www.sqlite.org/pragma.html#pragma_user_version)
 
 ```mermaid
 erDiagram
@@ -18,6 +18,8 @@ erDiagram
     shop_item |o..o{ not_transaction : "item_id"
     not_transaction |o..o| not_transaction : "sale_of"
     not_transaction |o..o| not_transaction : "refund_of"
+    transaction_reason ||..o{ reward_event : "reason"
+    not_transaction |o..o| reward_event : "付与結果のentry_id"
 
     transaction_reason {
         TEXT code PK "固定の取引理由コード"
@@ -69,6 +71,14 @@ erDiagram
         INTEGER sale_of FK, UK "対応する購入（SALEのみ）"
         INTEGER refund_of FK, UK "取消元の購入または売上"
         TEXT created_at "記録日時"
+    }
+    reward_event {
+        TEXT guild_id PK "DiscordサーバーID"
+        TEXT event_key PK "報酬種別と元イベントのキー"
+        TEXT user_id "受取人"
+        TEXT reason FK "報酬の4種別"
+        INTEGER received_at "Bot受付日時のUnixミリ秒"
+        INTEGER entry_id FK, UK "付与した取引ID。制限で見送った場合はNULL"
     }
 ```
 
@@ -174,6 +184,21 @@ CREATE TABLE not_transaction (
 CREATE INDEX not_transaction_balance_idx
     ON not_transaction (guild_id, user_id);
 
+CREATE TABLE reward_event (
+    guild_id TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    reason TEXT NOT NULL REFERENCES transaction_reason(code)
+        CHECK (reason IN ('MESSAGE', 'REACTION', 'REACTION_RECEIVED', 'REPLY_RECEIVED')),
+    received_at INTEGER NOT NULL CHECK (typeof(received_at) = 'integer' AND received_at >= 0),
+    entry_id INTEGER UNIQUE REFERENCES not_transaction(id),
+    PRIMARY KEY (guild_id, event_key)
+);
+
+CREATE INDEX reward_event_limits_idx
+    ON reward_event (guild_id, user_id, reason, received_at)
+    WHERE entry_id IS NOT NULL;
+
 INSERT INTO transaction_reason (code) VALUES
     ('MESSAGE'), ('REACTION'), ('REACTION_RECEIVED'), ('REPLY_RECEIVED'),
     ('TIP_SENT'), ('TIP_RECEIVED'), ('TIMEOUT'), ('PURCHASE'), ('SALE'),
@@ -259,9 +284,18 @@ VIEWは保存済み残高やキャッシュではなくSELECTの定義で、参�
 
 <!-- ponytail: SQLiteの単一ライタで書き込みを直列化する。競合が実測で問題になったら、別DBで同じ整合性契約を実装する。 -->
 
+## 報酬の処理結果
+
+`reward_event` は付与と制限による見送りの両方をINSERTで記録する。`entry_id` がNULLなら見送り、付与なら同じトランザクションで記録した報酬の取引を参照する。報酬額は投稿5・リアクション実行1・リアクション受信10・返信受信20 NOT。旧仕様で付与済みの1 NOTは履歴を変更せず、再試行でも元の額を返す。返信・リアクションの各受取人は独立して判定する。
+
+`received_at` はBotの受付時刻をUnixミリ秒で保存する。サーバー・受取人・報酬種別ごとに付与済み結果の最新時刻と当日件数を読み、60秒間隔と日本時間00:00からの100回上限を照合する。UTCのUnixミリ秒へ9時間を加えて日付を区切り、日付変更でも間隔は維持する。見送り結果は制限の件数や最終付与時刻へ含めず、同じイベントの再試行では元の見送りを返す。
+
+報酬の取引と処理結果を同じImmediateトランザクションで確定する。DB移行もDDLと版番号を一括確定し、いずれもDBセッション中にDiscord・ファイルI/Oを行わない。処理結果だけ・付与だけの片側確定は許可しない。既存テーブルに0 NOTの報酬を混ぜず、取引理由の正数制約を保持する。
+
 ## コンテンツと公開投稿
 
 - `CONTENT` の `target` は `content_file.key` に対応する。`ROLE` ではロールIDを使うため、この対応はFKではなくアプリケーションが検証する。コンテンツ作成時は、保存済みファイル情報・商品・初版を同じトランザクションでINSERTする。未保存のキーを商品にしない。
+- P13のROLE商品は既存の `shop_item` と初版を同じトランザクションでINSERTし、`content_file` は作らない。確認・購入・売上・返金は既存の履歴と制約を共用し、購入キーの `content:` 接頭辞も互換性のため維持する。起動時のロール照合は未返金の購入履歴から復元するため、配送状態テーブル・スキーマ変更は追加しない。
 - ファイル本体は非公開の永続ディスクに置く。キー・元のファイル名・サイズは不変とし、差し替えは別の商品として登録する。元のDiscord添付URLは保存先にしない。
 - 商品説明は商品版に含める。購入確認は商品版と価格を固定し、確定時に最新版と一致しなければ再確認する。`content:{quote_id}:buyer`・`content:{quote_id}:seller` を取引の重複処理防止キーにする。
 - `shop_item_publication` はDiscordへ投稿・編集できた商品版とメッセージを追記する。編集では同じメッセージIDに新しい商品版を記録でき、削除されたメッセージの再投稿では新しいメッセージIDを記録する。最新の公開先は商品ごとの最大 `id` から取得する。

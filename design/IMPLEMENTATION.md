@@ -1,6 +1,6 @@
 # 実装手順とCodexへの引き継ぎ
 
-P06まで完了し、起動時の設定検証・SQLite初期化、金額・商品・実行者・取引の型、DBの取引境界、残高・ランキング・管理者の残高調整、コンテンツの永続保存と商品操作、確認価格による購入、結果復元・購入権限の照会・返金がある。P07のDiscord接続・認証・残高コマンドは実装と自動検証を終え、実機確認待ち。進捗表に現在の状態を記録する。この文書は実装の順序と完了条件を定める。仕様は [CONTENT.md](CONTENT.md)、[DATABASE.md](DATABASE.md)、[REPOSITORY.md](REPOSITORY.md)、[ARCHITECTURE.md](ARCHITECTURE.md)を参照する。
+P06まで完了し、起動時の設定検証・SQLite初期化、金額・商品・実行者・取引の型、DBの取引境界、残高・ランキング・管理者の残高調整、コンテンツの永続保存と商品操作、確認価格による購入、結果復元・購入権限の照会・返金がある。P07〜P13のDiscord操作・コンテンツ売買・報酬・罰則・譲渡・ロール販売と復旧は実装と自動検証を終え、実機確認待ち。P12の報酬ルールはユーザー承認済み。未着手の実装工程はなく、次はREADMEに沿った実機確認。進捗表に現在の状態を記録する。この文書は実装の順序と完了条件を定める。仕様は [CONTENT.md](CONTENT.md)、[DATABASE.md](DATABASE.md)、[REPOSITORY.md](REPOSITORY.md)、[ARCHITECTURE.md](ARCHITECTURE.md)を参照する。
 
 ## 進め方
 
@@ -25,14 +25,17 @@ P08の前に、コードも [ARCHITECTURE.md](ARCHITECTURE.md)のドメイン・
 | 構成整理 | ドメイン・インフラの2層へ移行 | P00〜P07の既存実装 | 完了 |
 | 簡素化 | 手書きエラー処理・重複分岐を削除 | 構成整理 | 完了 |
 | Poise移行 | SQLite／Discordの配置とコマンド定義を整理 | 簡素化 | 完了 |
-| P08 | DMの出品コマンドとギルドへの商品投稿 | P04、P07 | 未着手 |
-| P09 | DMで購入確認・決済・ファイル受取・無料再送 | P06、P08 | 未着手 |
-| P10 | ファイル送信とフォームによる出品 | P08、P09 | 未着手 |
-| P11 | 商品管理・返金の操作とコンテンツ売買の通し確認 | P09、P10 | 未着手 |
-| P12 | 投稿・リアクションの報酬、罰則、NOT譲渡 | P03、P07 | 未着手 |
-| P13 | 既存設計のロール販売・復旧 | P06、P07 | 未着手 |
+| P08 | DMの出品コマンドとギルドへの商品投稿 | P04、P07 | 実機確認待ち |
+| モジュール分割 | 各 `mod.rs` の実装を役割別ファイルへ移設 | P08の実装 | 完了 |
+| P09 | DMで購入確認・決済・ファイル受取・無料再送 | P06、P08 | 実機確認待ち |
+| P10 | ファイル送信とフォームによる出品 | P08、P09 | 実機確認待ち |
+| P11 | 商品管理・返金の操作とコンテンツ売買の通し確認 | P09、P10 | 実機確認待ち |
+| P12 | 投稿・リアクションの報酬、罰則、NOT譲渡 | P03、P07 | 実機確認待ち |
+| P13 | 既存設計のロール販売・復旧 | P06、P07 | 実機確認待ち |
 
 P00〜P11でDiscord内のコンテンツ売買を完成させる。P12は既存のNOT機能、P13は既存設計のロール販売の後続工程で、コンテンツ売買の完成条件には含めない。状態は「未着手／実装中／完了／実機確認待ち」とし、変更時には検証結果も記録する。
+
+再開時照合記録（2026-10-19）：P00〜P06は `config.rs`・`main.rs`、ドメイン型、SQLiteの初期化・残高・商品・購入・返金の実装と既存テストを照合した。最初の未完了工程はP07であり、P12の報酬仕様待ちへ飛ばして完了判定しない。`discord/bot.rs` の登録・接続・終了、`commands.rs` の残高・ランキング・調整からP03への接続、`services.rs` のDM対象ギルド・REST所属確認・管理権限、`events.rs` の秘密を含めないエラー応答を確認した。`discord/services/tests.rs` に2件を追加し、共用ローカルHTTPを2ギルドに対応させて、REST認証から実SQLiteまでのギルド分離・同一依頼の再試行・一般ユーザーの拒否・所有者とADMINISTRATORの認可・MANAGE_GUILDだけの拒否・権限剥奪・退会、DMのguild必須・別ギルド指定拒否・整数上限・Poiseの登録定義・SDKの秘密トークン付きエラーの非公開を確認した。共用fixtureの所属先追加に合わせ、P10の未所属候補のID範囲も調整した。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全73件）、`git diff --check` が成功し、トークン未設定の起動拒否も再確認した。機能・依存・スキーマの追加はない。READMEのP07実機確認表はすべて未実施であり、実際のSlash受付・Gateway・候補表示・シグナル終了は自動テストで代替していない。P07の完了条件にある手動確認が残るため、進捗表は「実機確認待ち」を維持する。次の作業はREADMEのP07実機確認。P12の報酬仕様待ちも継続する。
 
 P00検証記録：`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo test --locked --all-targets`（2件成功）、`cargo clippy --locked --all-targets -- -D warnings` が成功。起動確認では、トークン不足と不正なギルド／チャンネルIDを拒否し、設定エラーにトークン値を含めないこと、および有効なダミー設定でDiscordへ接続せず終了することを確認した。実Discord・実トークンを使った確認はしていない。次工程はP01。
 
@@ -56,16 +59,41 @@ P07検証記録：`cargo fmt --all -- --check`、`cargo check --locked --all-tar
 
 Poise移行検証記録：インフラを `sqlite/` と `discord/` に分け、SQLite側へ既存の `NotUseCase`・`ShopUseCase` とDB実装を移設した。DiscordはJadeMusicの分割に合わせて `commands.rs`・`events.rs`・`services.rs` とファイル保存用の `content.rs` に整理した。共通の保存済みファイル型・上限はインフラの `mod.rs` に置き、SQLiteからDiscordを参照しない。Poise 0.7.1を導入し、手書きのコマンドビルダー・サブコマンド振分け・オプション取得・候補返信を削除した。Poiseの定義から登録情報を生成し、他のコマンドを置換しない従来の登録方式を維持する。所属・権限・DMのギルド指定・残高の全文字列解析・操作IDによる重複排除・秘密情報を含むSDKエラーの非公開は維持した。ドメイン・SQL・既存のDB操作本体は変更せず、実DBテストは参照パスと説明コメントだけを更新した。`cargo fmt --all -- --check`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --locked --all-targets --quiet`（全59件）、`git diff --check` が成功。Poiseの生成するGuild／BotDmコンテキスト・STRINGのguild／残高・USERの対象ユーザー・必須指定、DMと別ギルドの制約、REST認証と実SQLiteの残高・ランキング・同一操作の再試行、外部エラーの非公開を自動確認した。トークン未設定の起動も終了コード1で拒否した。README・参照設計・対象パス・内部リンク27件も更新・確認済み。Poiseとその依存の4パッケージを追加し、既存の依存バージョンは維持した。実Discordの登録反映・引数解析と操作・候補表示・Gateway終了は未確認で、P07は実機確認待ちのまま。P08の機能追加・後続の空実装は作らず、次の工程はP08。
 
+P08検証記録：`cargo fmt --all -- --check`、`cargo clippy --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --locked --all-targets`（全59件成功、P08の9件を含む）、`git diff --check` が成功。PoiseのDM用 `/content add` に必須の5引数・STRING価格・ATTACHMENT・ギルド候補を定義し、本人ごとの5分間の下書き・出品／取消ボタンを接続した。候補は販売チャンネル設定のある所属ギルドへ絞り、確定時と再投稿時にRESTで所属を再確認する。Discord添付だけを上限付きで取得し、既存の `store_content`・`ShopUseCase.create` を再利用する。非同期HTTP取得の実データ上限とリダイレクト拒否に、既存の間接依存reqwest 0.12.28を直接宣言し、新しい依存パッケージや版変更はない。公開Embed・購入ボタン、公開記録の追記／照会、`PublicationPending` と既存商品IDからの再投稿を実装した。ローカルHTTPと実SQLiteで投稿失敗・公開記録のINSERT失敗・再接続後の再投稿・同時再試行、商品数の維持、公開ペイロードに原本・保存キー・元URL・保存先が含まれないこと、不要なメンションとComponents V2の抑止を確認した。本人・期限・二重操作・取消、UTF-16文字数、外部URL・不正ファイル名・容量上限、別ギルドの販売チャンネルとBot権限不足の拒否も確認した。新しいテーブル・汎用層・後続工程の空実装は追加していない。READMEに設定・操作・実機確認手順を追記した。実Discordでのコマンド反映・DM添付取得・上限サイズの保存・商品表示・権限復旧後の再投稿は未確認で、P08は実機確認待ち。購入ボタンの確認・決済・配送はP09で実装する。
+
+P08レビュー修正記録：商品再照会のDBエラーでも既存商品IDと再投稿ボタンを返す。販売チャンネルの確認はプレビュー時と公開直前に絞り、確定時の重複REST照会4回を削除した。既存テストにDB停止・再接続とLocation付き302を加え、修正前の不具合とリダイレクト許可時にテストが失敗することを確認した。全59テスト（件数維持）・fmt・clippy（警告をエラー扱い）・差分チェックが成功。実Discordは未確認で、P08は実機確認待ち。次工程はP09。
+
+モジュール分割検証記録：各 `mod.rs` をモジュール宣言と再公開だけにした。SQLiteは接続・初期化、取引境界、残高・取引SQL、商品・公開記録SQL、エラー変換へ分け、Discordは起動処理と共有データを分離した。共通エラーと保存済みファイル型も専用ファイルへ移設し、既存の公開パスを再公開で維持する。移設した41関数の本体と型定義の一致を確認し、既存59テスト・fmt・clippy（警告をエラー扱い）・差分チェックが成功。テスト件数は維持した。配置表と参照設計を更新済み。実Discordは未確認で、P07・P08は実機確認待ち。次工程はP09。
+
+P09検証記録：`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets`（全63件、P09の4件を含む）、`git diff --check` が成功。P05・P06を再利用し、ギルドの購入ボタンからDMの価格・残高・購入後残高入り確認、本人照合後の確認消費、決済、DM添付、結果復元と無料再送を接続した。決済前に所属・原本の読出し・サイズ・DMの添付上限を確認し、配送直前にも未返金の購入権限を照合する。全ボタンの先行deferと応答をイベント入口へ集約し、確認状態のロックやDBセッションを保持してDiscord APIを待たない。`DeliveryPending` は購入IDと無料再送ボタン、決済結果不明は同じ確認IDの照合ボタンで扱う。`/content purchases` は5件ずつの一覧・ページ切替・無料再送を提供する。既存のローカルHTTP・実SQLiteの準備を共用し、DM拒否・取消・原本欠落・退会・期限・添付上限での課金なし、二重クリックと再接続後の復元、商品削除後の再送、別人・返金済みの拒否、配送失敗後の無料再送、決済途中の取消と同じ確認への復旧ボタンを確認した。購入・返金のSQLとスキーマ、依存は維持し、READMEと参照設計を更新済み。実Discordのコマンド反映・購入DM・上限サイズの配送・DM設定変更後の再送は未確認で、P09は実機確認待ち。次工程はP10。
+
+P10検証記録：`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets`（全66件、P10の3件を含む）、`git diff --check` が成功。`posting.rs` にDMの単一添付、出品ボタン、設定済みサーバー25件ずつの所属照合・ページ切替、商品名・説明・価格のモーダルを実装した。入力は本人・メッセージID・出品先・5分の期限に結び付け、添付送り直し・取消・期限切れ・再起動で失効する。フォーム送信はP08と同じ `ListingDraft`・プレビューへ合流し、保存・商品作成・公開を再利用する。新規の公開商品にはギルド側の出品ボタンを付け、DMへ出品先を引き継ぐ。Gatewayは `GUILDS | DIRECT_MESSAGES`、モーダルを開く操作は初回応答にModalを返し、外部照会を行う処理は先にdeferする。既存のHTTP・実SQLiteテスト基盤で、添付からのフォーム・プレビュー、コマンド用プレビューとの一致、本人・出品先・価格・取消・古い入力・期限・再起動後の拒否、26件設定時のページ切替と未所属候補の除外、未確定のファイル・商品が保存されないことを確認した。DB・SQL・依存は維持し、配置表とREADMEを更新済み。実Discordの添付受信、メニュー・モーダル、ギルドからのDM案内、公開・購入・配送までの通し確認は未実施で、P10は実機確認待ち。次工程はP11。
+
 ## Codexへ渡す依頼文
 
-次の未着手工程はP08。P07の実機確認はREADMEの手順で別途行い、結果を記録する。次の文を使い、以後は工程IDを置き換える。
+P11検証記録：`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets`（全68件、追加は通し検証の2件）、`git diff --check` が成功。`management.rs` のDM用 `/content update`・`delete`・`republish`・`refund` を既存のP04・P06へ接続した。所属と権限は既存のREST認証で再確認し、商品ID・期待する版を使って変更・削除する。公開処理は商品ごとのロックへ変更し、最新の公開記録にあるメッセージを編集する。Unknown Messageなら再作成し、成功した公開版・メッセージを追記する。削除版は販売終了と購入ボタン無効化で表示し、編集失敗でもDBの最新価格・販売終了状態を維持する。既存のローカルHTTPと実SQLiteで、最新記録への編集、競合更新、他人・別ギルドの拒否、古い購入確認の拒否、編集失敗・削除後の新規購入拒否・再投稿を検証した。NOT供給→原本保存・商品登録→公開→DM確認→決済→配送→無料再送→変更・削除→DBと原本の停止後コピー・復元→無料再送→管理者返金→二重返金・再送拒否も確認した。実CDNからの添付取得はこの通しテストに含めていない。商品ID・確認ID・購入ID等のログとREADMEの管理操作・単一プロセスでの起動・停止・バックアップ／復元手順・実機確認表を追加し、参照設計と配置表を更新した。スキーマ・決済SQL・依存の追加はなく、後続工程の空実装は作っていない。実Discordでのコマンド反映・商品編集・添付取得と配送・再起動／復元後の通し確認は未実施で、P11は実機確認待ち。完成条件の実機確認マークは付けていない。次工程はP12で、先に未確定の報酬ルールを確認する。
+
+P12検証記録（確定済み部分）：`cargo check --offline --locked --all-targets`、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全71件、追加3件）、`git diff --check` が成功。`NotUseCase.penalize` は管理権限と依頼キーを照合し、残高0でも0の履歴を残して最大100 NOTを減算する。`transfer` は自己譲渡・指定外の金額・残高不足・受取側上限超過を拒否し、100・500・1,000 NOTの送受信を同じImmediateトランザクションで一括追記する。同じ依頼は再起動後も元の結果を返し、対象・金額等の不一致と片側だけの履歴を拒否する。既存の `/not` に `penalize`・`transfer` を接続し、REST認証・対象メンバー確認を再利用した。実SQLiteの2件で罰則の下限・再試行、譲渡のINSERT／COMMIT失敗、同時再試行、罰則・譲渡・購入の競合と売上消費・返金の競合を検証した。ローカルHTTPの1件で最新の管理権限・所属照合とコマンドの譲渡額候補を確認した。READMEと参照設計を更新し、スキーマ・依存・ドメイン型・後続工程の空実装は追加していない。報酬額・制限が未回答のため `grant_reward` と報酬イベント処理は未実装で、上限・間隔・報酬のイベント重複排除は未検証。P12全体を完了や実機確認待ちにはしていない。実Discordのコマンド反映・罰則・譲渡・退会後の拒否も未確認。次の作業は報酬仕様の確定とP12の残りの実装・検証。
+
+P12報酬実装・検証記録：提案した報酬ルールにユーザーの承認を得た。`NotUseCase.grant_reward` とSQLiteの `rewards.rs`、Discordの `rewards.rs` に投稿・返信・リアクションの各1 NOT、サーバー・受取人・種別ごとの60秒間隔と日本時間の日次100回上限を実装した。メッセージIDとリアクション実行者で重複排除し、Bot・Webhook・自己操作・DM・非メンバーを除外する。新しい `reward_event` は付与と制限による見送りの両方をINSERTで保持し、同じイベントを後日付与し直さない。制限・残高上限の照合、1 NOTの取引と処理結果の追記は同じImmediateトランザクションで確定する。`002_rewards.sql` を追加し、既存の版1のDBは履歴・残高・商品を保って版2へ移行する。報酬用の `GUILD_MESSAGES`・`GUILD_MESSAGE_REACTIONS` を追加し、Privileged Intentと追加依存は使わない。実SQLiteの2件と既存HTTP基盤の1件を追加し、版1からの移行、59.999秒／60秒、100回上限、日本時間の日付境界、見送り・付与の再起動後の復元、種別・受取人・ギルド分離、Bot・Webhook・自己操作・未所属の拒否、絵文字変更・再追加、INSERT／COMMIT失敗時の全体取消、同時イベント・購入・返金との競合と残高上限を確認した。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全76件）、`git diff --check` が成功。READMEの設定・運用・実機確認表、DB設計・API・配置図を更新した。後続工程の空実装は追加していない。実Discordのイベント受信・付与・メッセージ取得権限・再起動後の動作は未確認のため、P12は実機確認待ち。次の実装工程はP13。
+
+P13実装・検証記録（2026-10-19）：`ShopUseCase.create_role` とロール商品の保存、未返金購入の照会・起動時照合用一覧、購入者本人のROLE購入に限定した内部返金を追加した。`discord/roles.rs` の `/role add`・`recover` から、既存の商品公開・DM購入確認・決済・購入一覧・管理者返金へ接続した。登録は所有者／ADMINISTRATORに限定し、Serenityの権限計算・ロール順序でBotのMANAGE_ROLES・階層・管理ロール・既保有・所属を照合する。COMMIT後に付与し、APIの成否だけで判断せず保有を再照合する。未付与を確認できれば元額を返金し、状態不明・返金不能なら権利を保持して再照合・GuildCreateで復旧する。削除済み商品も復旧対象とし、返金済み購入は除外する。管理者返金は解除を確認してから既存の返金を呼び、不成立なら権利を確認して復元を試みる。既存の商品単位ロックで公開・配送・返金を直列化する。既存のローカルHTTP・実SQLite基盤へ3件を追加し、登録・階層と権限・自己購入・二重確定・付与失敗時の返金・結果不明・DB再接続と商品削除後の再付与・売上消費による返金不能と手動返金時の復元・別人／別ギルド拒否を検証した。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全79件）、`git diff --check` が成功。依存・設定・ドメイン型・テーブル・後続工程の空実装は追加していない。実Discordのコマンド登録・付与／解除・API障害・Gatewayからの起動時照合は未確認のため、P13は実機確認待ち。READMEに実機確認表を追加した。
+
+実機調査の診断ログ修正（2026-10-19）：イベント処理の失敗が同じ一文に集約され、原因を特定できない報告を受けた。`events.rs` のPoiseイベントエラー境界にイベント名とHTTPステータス・Discordエラーコードを追加し、業務・DB・I/Oエラーは安全な種類だけを出力する。URL・応答本文・イベント全体は出力しない。既存の認証・エラー非公開テストへ診断情報と秘密情報の非公開の確認を追加した。`env -u DISCORD_TOKEN cargo test --offline --locked services::tests --quiet`（既存2件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。実Discordでの失敗原因はまだ特定していないため、各工程の実機確認待ちは維持する。
+
+公開商品のUI修正（2026-10-19）：購入時の `interaction_create HTTP=400 code=50035` の報告とユーザーの指示を受け、コンテンツ・ロール共通の公開商品から「出品する」ボタンを削除した。専用のギルドからDMへの案内処理と添付なしの入力状態も削除し、出品はDM添付か `/content add` を使う。DMでの出品プレビュー・購入確認は維持した。既存のP10テストを現在の導線へ修正し、追加テストは作らず、`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全79件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。参照設計・READMEを更新した。既存投稿はBot再起動後に出品者の `/content republish` でボタンを取り除く。実Discordでの反映と50035の解消は未確認のため、工程の実機確認待ちは維持する。
+
+報酬額の変更（2026-10-19）：ユーザーの指定に従い、投稿5・リアクション実行1・リアクション受信10・返信受信20 NOTへ変更した。商品売上は販売価格分のままとし、60秒間隔・日次100回・種別ごとの集計と除外条件は維持する。過去の一律1 NOTは元の結果として復元し、履歴を書き換えたり再配信で差額を付与したりしない。既存の報酬テスト3件を新額へ更新し、DB再接続後の旧額の復元と、新旧の履歴が混在した残高も確認した。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全79件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。依存・スキーマ・設定・テスト件数の追加はない。新額の実Discordでの付与は未確認のため、P12は実機確認待ちを維持する。次はBot再起動後の実機確認。
+
+管理コマンドの統合（2026-10-19）：ユーザーの指示で `/not penalize` を削除し、`/not adjust user:対象 amount:正負の整数` に統合した。目標残高の `balance` 引数を増減額の `amount` に変更し、正数・明示的な+・負数・0と符号付き64bit整数の上下限を文字列で受け付ける。固定100 NOTの罰則処理を `NotUseCase.adjust_amount` へ置き換え、管理権限・対象所属・増減後の非負と整数範囲を検証する。過大減算は切り詰めず拒否する。`adjust-amount:{request_id}` で対象・理由・額を照合し、同じImmediateトランザクションで残高検証と `ADJUSTMENT` の追記を行う。既存の目標残高調整APIと旧 `TIMEOUT`・`adjust:`・`penalty:` の履歴は保持する。既存テストを更新し、正負・0、権限拒否、異なる額のID再利用、再起動後の復元、同時再試行、購入・譲渡との競合、INSERT／COMMIT失敗時の全体取消、負の残高と上限超過の拒否を確認した。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全79件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。設定・依存・スキーマ・テスト件数の追加はない。実Discordでの新しい引数・旧サブコマンドの削除は未確認のため、実機確認待ちは維持する。次はBotを再起動してコマンド登録を更新し、READMEの手順で確認する。
+
+未着手の実装工程はない。P07〜P13の実機確認をREADMEの手順で行い、結果を記録する。
 
 ```text
-@Ponytail design/IMPLEMENTATION.md の P08 を実装してください。
-該当工程の前提と参照設計を読み、既存コードがあれば再利用してください。
-対象工程の完了条件まで実装・検証し、進捗表を更新してください。
-後続工程の空実装や追加の抽象化は作らないでください。
-変更点・実行した検証・未確認事項・次の工程を報告してください。
+@Ponytail README.md の P07〜P13 の実機確認を進めてください。
+design/IMPLEMENTATION.md と現在のコード・検証記録を照合し、未確認項目を確認してください。
+実施した結果・未確認事項を記録し、証拠が揃った工程だけ進捗表を更新してください。
+既存の自動テストを実機確認の代わりに完了扱いにしないでください。
 ```
 
 中断後の再開には次を使う。
@@ -95,10 +123,11 @@ Poise移行検証記録：インフラを `sqlite/` と `discord/` に分け、S
 | `src/lib.rs` | テストからも利用するモジュールの公開 |
 | `src/main.rs`・`src/infrastructure/config.rs` | 設定と具体実装の組み立て |
 | `src/domain.rs` | 金額・商品・取引などの型と不変条件 |
-| `src/infrastructure/mod.rs` | 操作エラーと保存済みファイルの共通値。ドメインの共通型は `src/domain.rs` |
-| `src/infrastructure/sqlite/` | `mod.rs` にSeaORM・取引境界、`not.rs`・`shop.rs` に操作処理、初期SQL |
+| 各 `mod.rs` | モジュール宣言と再公開のみ |
+| `src/infrastructure/error.rs`・`stored_content.rs` | 操作エラーと保存済みファイルの共通値。ドメインの共通型は `src/domain.rs` |
+| `src/infrastructure/sqlite/` | 接続は `database.rs`、取引境界は `session.rs`、SQLは `ledger.rs`・`items.rs`、操作処理は `not.rs`・`shop.rs`、DBエラーは `error.rs` |
 | `src/infrastructure/discord/content.rs` | 非公開の永続ディスクへの具体的な保存処理 |
-| `src/infrastructure/discord/` | Poiseの接続・共有データ、`commands.rs`、`events.rs`、`services.rs` |
+| `src/infrastructure/discord/` | 起動・接続は `bot.rs`、共有データは `data.rs`、コマンドは `commands.rs`、イベントは `events.rs`、認証は `services.rs`、添付・フォームは `posting.rs`、出品・公開は `listings.rs`、購入・配送・再送は `purchases.rs` |
 | `tests/sqlite_flows.rs` | 実DBを使う残高・商品・購入・返金の検証 |
 
 ## P00: ビルドと設定の土台
@@ -225,7 +254,7 @@ SeaORMには `TransactionOptions.sqlite_transaction_mode` と `SqliteTransaction
 - DMで1ファイルを受け取ると、本人向けに「このファイルを出品する」を提示する。送っただけでは公開しない。
 - サーバー選択と商品名・説明・価格のフォームをP08と同じ下書きへ接続する。作成・検証・保存・公開の処理を別に作らない。
 - 入力途中の取消・期限切れ・再起動・別ユーザーによる操作を扱う。候補が多ければ検索やページ分割する。
-- ギルドの「出品する」からDMへ案内する場合は、出品先ギルドを引き継ぐ。初期実装でモーダルの新しい添付機能へ切り替える必要はない。
+- 出品の入口はBotとのDMに集約し、ギルドの公開商品には購入ボタンだけを置く。初期実装でモーダルの新しい添付機能へ切り替える必要はない。
 
 **完了条件**：コマンドを入力せず、DM添付から商品公開まで進める。未確定のファイルや下書きが公開されず、コマンド経由と同じ商品・検証結果になる。
 
@@ -242,13 +271,24 @@ SeaORMには `TransactionOptions.sqlite_transaction_mode` と `SqliteTransaction
 
 ## P12: 既存のNOT報酬・罰則・譲渡
 
-**対象**：`grant_reward`・`penalize`・`transfer` と投稿・リアクション・返信等のイベント処理。
+**対象**：`grant_reward`・`adjust_amount`・`transfer` と投稿・リアクション・返信等のイベント処理。
+
+**現在の内訳**：報酬・増減指定・譲渡のDB操作、報酬イベント処理と `/not adjust`・`transfer` は実装・自動検証済み。罰則と調整はユーザーの指示で `/not adjust amount:正負の整数` に統合した。実Discordでの確認は未実施。
+
+ユーザーが以下の案を承認したため、報酬仕様として確定した。上限判定はBotでの受付時刻を使う。日次上限と60秒間隔は付与済みの報酬だけを数え、見送ったイベントの処理結果もDBへ残す。返信者の投稿報酬と返信先への報酬、リアクションの両受取人の報酬は独立して判定する。
+
+| 確認項目 | 確定した仕様 | 状態 |
+|---|---|---|
+| 投稿・リアクション実行者・リアクション受信者・返信受信者の付与額 | 順に5・1・10・20 NOT | 承認済み |
+| 回数上限・集計期間・最短間隔と、その適用単位 | サーバー・受取人・報酬種別ごとに60秒に1回、1日100回まで。日付は日本時間で区切る | 承認済み |
+| Botの投稿・操作と自己リアクション・自己返信を対象にするか | Bot・Webhook・自己リアクション・自己返信を対象外にする。自己返信、Bot・Webhookへの返信は投稿報酬も対象外 | 承認済み |
+| リアクション再追加・同一投稿への複数絵文字を別報酬にするか（イベントキーの単位） | 同じ投稿への同じ人のリアクションは絵文字や付け直しによらず1回。投稿・返信は各メッセージIDで重複排除 | 承認済み |
 
 - まず報酬額、回数・間隔、Bot・自己操作の扱い、イベントキーの単位を仕様として明記する。現在の設計書に具体値がない報酬・制限は推測で決めず、その項目だけユーザーへ確認する。コンテンツ売買の完成はこれに依存させない。
-- 罰則は `-min(100, 現在残高)`、譲渡は100・500・1,000NOTとする。自己譲渡・残高不足を拒否し、送受信の2行を一括追記する。
+- 管理者の増減指定は `/not adjust` に統合し、正負の整数額を自由に指定する。増減後の負の残高・整数上限超過を拒否する。譲渡は100・500・1,000NOTとし、自己譲渡・残高不足を拒否し、送受信の2行を一括追記する。
 - Discordイベントの再配信で報酬を重複させない。報酬の制限も同じ書き込みセッションで照合する。
 
-**完了条件**：同じイベントの再処理、上限・間隔、残高0の罰則、送受信途中の失敗を確認できる。購入・返金と並行しても負の残高や二重反映が発生しない。
+**完了条件**：同じイベントの再処理、上限・間隔、正負の調整と過大減算の拒否、送受信途中の失敗を確認できる。購入・返金と並行しても負の残高や二重反映が発生しない。
 
 ## P13: ロール販売の後続実装
 

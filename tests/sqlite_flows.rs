@@ -103,14 +103,14 @@ async fn migrations_and_seed_data_survive_reopen_and_concurrent_startup() {
     let path = file.path();
     let db = SqliteDatabaseAccess::open(&path).await.unwrap();
     let raw = inspect(&path).await;
-    assert_eq!(number(&raw, "PRAGMA user_version").await, 1);
+    assert_eq!(number(&raw, "PRAGMA user_version").await, 2);
     assert_eq!(
         number(
             &raw,
             "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         )
         .await,
-        7,
+        8,
     );
     assert_eq!(
         number(&raw, "SELECT COUNT(*) FROM sqlite_schema WHERE type='view'").await,
@@ -553,14 +553,14 @@ async fn newer_schema_versions_are_rejected_and_closed_pools_are_unavailable() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let raw = inspect(&file.path()).await;
-    raw.execute_unprepared("PRAGMA user_version = 2")
+    raw.execute_unprepared("PRAGMA user_version = 3")
         .await
         .unwrap();
     assert_eq!(
         SqliteDatabaseAccess::open(file.path()).await.err(),
         Some(DatabaseError::InvalidData)
     );
-    assert_eq!(number(&raw, "PRAGMA user_version").await, 2);
+    assert_eq!(number(&raw, "PRAGMA user_version").await, 3);
     raw.close().await.unwrap();
     let closed = db.clone();
     db.close().await.unwrap();
@@ -576,6 +576,550 @@ fn admin() -> Actor {
 
 fn target(value: i64) -> Balance {
     Balance::try_from(value).unwrap()
+}
+
+#[tokio::test]
+async fn rewards_migrate_preserve_decisions_enforce_jst_limits_and_survive_reopen() {
+    let file = TestDatabase::new();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    not.adjust_balance(admin(), user(), target(41), "legacy")
+        .await
+        .unwrap();
+    let raw = inspect(&file.path()).await;
+    // v1の既存DBへ移行する経路も、同じ保存済み履歴で検証する。
+    raw.execute_unprepared("DROP TABLE reward_event; PRAGMA user_version = 1")
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    assert_eq!(number(&raw, "PRAGMA user_version").await, 2);
+    assert_eq!(not.get_balance(admin()).await.unwrap(), target(41));
+    let start = UNIX_EPOCH + Duration::from_secs(54_000); // 日本時間の00:00
+    let first = not
+        .grant_reward(admin(), LedgerReason::Message, "message-0", start)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.amount().get(), 5);
+    assert!(
+        not.grant_reward(
+            admin(),
+            LedgerReason::Message,
+            "too-soon",
+            start + Duration::from_millis(59_999)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    for index in 1..100 {
+        assert!(
+            not.grant_reward(
+                admin(),
+                LedgerReason::Message,
+                &format!("message-{index}"),
+                start + Duration::from_secs(index * 60)
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+    assert!(
+        not.grant_reward(
+            admin(),
+            LedgerReason::Message,
+            "daily-cap",
+            start + Duration::from_secs(6000)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let midnight = start + Duration::from_secs(86_400);
+    assert!(
+        not.grant_reward(admin(), LedgerReason::Message, "next-day", midnight)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        not.grant_reward(
+            admin(),
+            LedgerReason::Reaction,
+            "independent-reason",
+            midnight
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let other = Actor::new(GuildId::try_from(101).unwrap(), user(), false);
+    assert!(
+        not.grant_reward(other, LedgerReason::Message, "message-0", start)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        not.grant_reward(buyer(), LedgerReason::Message, "message-0", start)
+            .await
+            .is_err()
+    );
+    assert!(
+        not.grant_reward(buyer(), LedgerReason::Message, "independent-user", start)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        not.grant_reward(admin(), LedgerReason::Adjustment, "invalid", start)
+            .await,
+        Err(UseCaseError::InvalidRewardReason)
+    );
+    assert_eq!(
+        not.grant_reward(
+            admin(),
+            LedgerReason::Message,
+            "invalid-time",
+            UNIX_EPOCH - Duration::from_secs(1)
+        )
+        .await,
+        Err(UseCaseError::InvalidRewardTime)
+    );
+    // 日付が変わっても60秒の間隔はリセットしない。
+    not.grant_reward(
+        buyer(),
+        LedgerReason::Reaction,
+        "before-midnight",
+        midnight - Duration::from_millis(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        not.grant_reward(buyer(), LedgerReason::Reaction, "at-midnight", midnight)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        not.grant_reward(
+            buyer(),
+            LedgerReason::Reaction,
+            "after-interval",
+            midnight + Duration::from_millis(59_999)
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(not.get_balance(admin()).await.unwrap(), target(547));
+    // 変更前に付与済みの1 NOTは再起動・再配信でも増額しない。
+    raw.execute_unprepared(
+        "INSERT INTO not_transaction (guild_id, user_id, amount, reason, event_key)
+         VALUES ('102', '200', 1, 'MESSAGE', 'reward:MESSAGE:legacy-message');
+         INSERT INTO reward_event (guild_id, event_key, user_id, reason, received_at, entry_id)
+         SELECT guild_id, event_key, user_id, reason, 0, id FROM not_transaction
+         WHERE guild_id = '102' AND event_key = 'reward:MESSAGE:legacy-message';",
+    )
+    .await
+    .unwrap();
+    raw.close().await.unwrap();
+    db.close().await.unwrap();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    assert_eq!(
+        not.grant_reward(admin(), LedgerReason::Message, "message-0", midnight)
+            .await
+            .unwrap(),
+        Some(first)
+    );
+    for key in ["too-soon", "daily-cap"] {
+        assert!(
+            not.grant_reward(
+                admin(),
+                LedgerReason::Message,
+                key,
+                midnight + Duration::from_secs(600)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+    assert_eq!(not.get_balance(admin()).await.unwrap(), target(547));
+    let legacy = Actor::new(GuildId::try_from(102).unwrap(), user(), false);
+    let restored = not
+        .grant_reward(legacy, LedgerReason::Message, "legacy-message", midnight)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored.amount().get(), 1);
+    assert_eq!(not.get_balance(legacy).await.unwrap(), target(1));
+    not.grant_reward(legacy, LedgerReason::Message, "new-message", midnight)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(not.get_balance(legacy).await.unwrap(), target(6));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rewards_rollback_atomically_and_serialize_with_purchase_refund_and_other_rewards() {
+    let file = TestDatabase::new();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let other_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    let other_not = NotUseCase::new(other_db.clone());
+    let (shop, item) = purchase_setup(&file, &db, 1200).await;
+    let raw = inspect(&file.path()).await;
+    for fail_commit in [false, true] {
+        raw.execute_unprepared(if fail_commit {
+            "CREATE TABLE reward_guard (code TEXT REFERENCES transaction_reason(code) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_reward AFTER INSERT ON reward_event
+             BEGIN INSERT INTO reward_guard VALUES ('UNKNOWN'); END;"
+        } else {
+            "CREATE TRIGGER reject_reward BEFORE INSERT ON reward_event
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+        }).await.unwrap();
+        assert!(
+            not.grant_reward(buyer(), LedgerReason::Message, "retry", purchase_time())
+                .await
+                .is_err()
+        );
+        assert_eq!(number(&raw, "SELECT COUNT(*) FROM reward_event").await, 0);
+        assert_eq!(
+            number(
+                &raw,
+                "SELECT COUNT(*) FROM not_transaction WHERE reason = 'MESSAGE'"
+            )
+            .await,
+            0
+        );
+        assert_eq!(not.get_balance(buyer()).await.unwrap(), target(1200));
+        raw.execute_unprepared("DROP TRIGGER reject_reward")
+            .await
+            .unwrap();
+    }
+    let (a, b) = tokio::join!(
+        not.grant_reward(buyer(), LedgerReason::Message, "retry", purchase_time()),
+        other_not.grant_reward(buyer(), LedgerReason::Message, "retry", purchase_time()),
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    let next = purchase_time() + Duration::from_secs(60);
+    let quote = shop
+        .prepare_purchase(buyer(), item.id(), "with-reward", next)
+        .await
+        .unwrap();
+    let (a, b, purchase) = tokio::join!(
+        not.grant_reward(buyer(), LedgerReason::Message, "concurrent-a", next),
+        other_not.grant_reward(buyer(), LedgerReason::Message, "concurrent-b", next),
+        shop.purchase(buyer(), &quote, next),
+    );
+    assert_ne!(a.unwrap().is_some(), b.unwrap().is_some());
+    let purchase = purchase.unwrap();
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(710));
+    let (reward, refund) = tokio::join!(
+        other_not.grant_reward(buyer(), LedgerReason::Reaction, "with-refund", next),
+        shop.refund(admin(), purchase.buyer().id(), "with-reward"),
+    );
+    assert!(reward.unwrap().is_some());
+    refund.unwrap();
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(1211));
+    not.adjust_balance(admin(), user(), target(i64::MAX), "upper-bound")
+        .await
+        .unwrap();
+    assert_eq!(
+        not.grant_reward(admin(), LedgerReason::Message, "overflow", next)
+            .await,
+        Err(UseCaseError::Money(MoneyError::Overflow))
+    );
+    assert_eq!(
+        number(
+            &raw,
+            "SELECT COUNT(*) FROM reward_event WHERE event_key = 'reward:MESSAGE:overflow'"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        number(&raw, "SELECT COUNT(*) FROM not_balance WHERE balance < 0").await,
+        0
+    );
+    raw.close().await.unwrap();
+    db.close().await.unwrap();
+    other_db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn adjustments_and_transfers_replay_and_rollback_without_partial_balances() {
+    let file = TestDatabase::new();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    let sender = Actor::new(guild(), user(), false);
+    let recipient = UserId::try_from(201).unwrap();
+    assert_eq!(
+        not.adjust_amount(sender, recipient, NotAmount::new(0), "zero")
+            .await,
+        Err(UseCaseError::PermissionDenied)
+    );
+    let zero = not
+        .adjust_amount(admin(), recipient, NotAmount::new(0), "zero")
+        .await
+        .unwrap();
+    assert_eq!(zero.amount().get(), 0);
+    not.adjust_amount(admin(), recipient, NotAmount::new(50), "seed-recipient")
+        .await
+        .unwrap();
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(0), "zero")
+            .await
+            .unwrap(),
+        zero
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(-51), "overdraft")
+            .await,
+        Err(UseCaseError::Money(MoneyError::NegativeBalance))
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(-50), "fifty")
+            .await
+            .unwrap()
+            .amount()
+            .get(),
+        -50
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), user(), NotAmount::new(-50), "fifty")
+            .await,
+        Err(UseCaseError::RequestConflict)
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(-49), "fifty")
+            .await,
+        Err(UseCaseError::RequestConflict)
+    );
+    assert_eq!(
+        not.adjust_amount(sender, recipient, NotAmount::new(-50), "fifty")
+            .await,
+        Err(UseCaseError::PermissionDenied)
+    );
+    not.adjust_balance(admin(), user(), target(1200), "seed-sender")
+        .await
+        .unwrap();
+    assert_eq!(
+        not.adjust_amount(admin(), user(), NotAmount::new(-100), "hundred")
+            .await
+            .unwrap()
+            .amount()
+            .get(),
+        -100
+    );
+    assert_eq!(
+        not.transfer(sender, user(), 100, "self").await,
+        Err(UseCaseError::SelfTransfer)
+    );
+    assert_eq!(
+        not.transfer(sender, recipient, 101, "invalid").await,
+        Err(UseCaseError::InvalidTransferAmount)
+    );
+    let first = not.transfer(sender, recipient, 100, "send").await.unwrap();
+    assert_eq!(
+        (first.0.amount().get(), first.1.amount().get()),
+        (-100, 100)
+    );
+    assert_eq!(
+        not.transfer(sender, recipient, 500, "send").await,
+        Err(UseCaseError::RequestConflict)
+    );
+    let raw = inspect(&file.path()).await;
+    for fail_commit in [false, true] {
+        raw.execute_unprepared(if fail_commit {
+            "CREATE TABLE transfer_guard (code TEXT REFERENCES transaction_reason(code) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_transfer AFTER INSERT ON not_transaction
+             WHEN NEW.reason = 'TIP_RECEIVED' OR NEW.event_key = 'adjust-amount:retry-adjust'
+             BEGIN INSERT INTO transfer_guard VALUES ('UNKNOWN'); END;"
+        } else {
+            "CREATE TRIGGER reject_transfer BEFORE INSERT ON not_transaction
+             WHEN NEW.reason = 'TIP_RECEIVED' OR NEW.event_key = 'adjust-amount:retry-adjust'
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+        }).await.unwrap();
+        assert!(not.transfer(sender, recipient, 500, "retry").await.is_err());
+        assert!(
+            not.adjust_amount(admin(), user(), NotAmount::new(50), "retry-adjust")
+                .await
+                .is_err()
+        );
+        assert_eq!(not.get_balance(sender).await.unwrap(), target(1000));
+        assert_eq!(
+            number(
+                &raw,
+                "SELECT COUNT(*) FROM not_transaction WHERE event_key LIKE 'transfer:retry:%'"
+            )
+            .await,
+            0
+        );
+        raw.execute_unprepared("DROP TRIGGER reject_transfer")
+            .await
+            .unwrap();
+    }
+    not.adjust_amount(admin(), user(), NotAmount::new(50), "retry-adjust")
+        .await
+        .unwrap();
+    not.adjust_amount(admin(), user(), NotAmount::new(-50), "restore")
+        .await
+        .unwrap();
+    not.transfer(sender, recipient, 1000, "last").await.unwrap();
+    assert_eq!(
+        not.transfer(sender, recipient, 100, "overdraft").await,
+        Err(UseCaseError::InsufficientBalance)
+    );
+    assert_eq!(
+        not.transfer(sender, recipient, 100, "send").await.unwrap(),
+        first
+    );
+    not.adjust_balance(admin(), user(), target(500), "refill")
+        .await
+        .unwrap();
+    not.adjust_balance(admin(), recipient, target(i64::MAX), "overflow-recipient")
+        .await
+        .unwrap();
+    assert!(matches!(
+        not.transfer(sender, recipient, 500, "overflow").await,
+        Err(UseCaseError::Money(MoneyError::Overflow))
+    ));
+    assert_eq!(not.get_balance(sender).await.unwrap(), target(500));
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(1), "adjust-overflow")
+            .await,
+        Err(UseCaseError::Money(MoneyError::Overflow))
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(i64::MIN), "adjust-min")
+            .await,
+        Err(UseCaseError::Money(MoneyError::NegativeBalance))
+    );
+    // 片側だけの不正履歴も、再試行で補完せず拒否する。
+    let mut write = db.begin_write().await.unwrap();
+    write
+        .append_entry(
+            NewLedgerEntry::try_new(
+                guild(),
+                user(),
+                NotAmount::new(-100),
+                LedgerReason::TipSent,
+                "transfer:broken:sent",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    write.commit().await.unwrap();
+    assert_eq!(
+        not.transfer(sender, recipient, 100, "broken").await,
+        Err(UseCaseError::Database(DatabaseError::InvalidData))
+    );
+    raw.close().await.unwrap();
+    db.close().await.unwrap();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    assert_eq!(
+        not.transfer(sender, recipient, 100, "send").await.unwrap(),
+        first
+    );
+    assert_eq!(
+        not.adjust_amount(admin(), recipient, NotAmount::new(0), "zero")
+            .await
+            .unwrap(),
+        zero
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn transfers_serialize_duplicates_and_compete_safely_with_purchase_and_refund() {
+    let file = TestDatabase::new();
+    let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let second_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let first = NotUseCase::new(first_db.clone());
+    let second = NotUseCase::new(second_db.clone());
+    let (shop, item) = purchase_setup(&file, &first_db, 1200).await;
+    let recipient = UserId::try_from(202).unwrap();
+    let (a, b) = tokio::join!(
+        first.transfer(buyer(), recipient, 100, "same"),
+        second.transfer(buyer(), recipient, 100, "same"),
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    let quote = shop
+        .prepare_purchase(buyer(), item.id(), "purchase", purchase_time())
+        .await
+        .unwrap();
+    let (transfer, purchase, adjustment, retry) = tokio::join!(
+        second.transfer(buyer(), recipient, 1000, "competing"),
+        shop.purchase(buyer(), &quote, purchase_time()),
+        first.adjust_amount(
+            admin(),
+            buyer().user_id(),
+            NotAmount::new(-100),
+            "competing-adjustment"
+        ),
+        second.adjust_amount(
+            admin(),
+            buyer().user_id(),
+            NotAmount::new(-100),
+            "competing-adjustment"
+        ),
+    );
+    let adjustment = adjustment.unwrap();
+    assert_eq!(adjustment, retry.unwrap());
+    assert_eq!(adjustment.amount().get(), -100);
+    assert_ne!(transfer.is_ok(), purchase.is_ok());
+    if purchase.is_err() {
+        first
+            .adjust_balance(admin(), buyer().user_id(), target(500), "refill")
+            .await
+            .unwrap();
+    }
+    let purchase = shop
+        .purchase(buyer(), &quote, purchase_time())
+        .await
+        .unwrap();
+    let seller = Actor::new(guild(), user(), false);
+    let (sent, refund) = tokio::join!(
+        second.transfer(seller, recipient, 500, "spent-sale"),
+        shop.refund(admin(), purchase.buyer().id(), "competing-refund"),
+    );
+    assert_ne!(sent.is_ok(), refund.is_ok());
+    assert_eq!(first.get_balance(seller).await.unwrap(), target(0));
+    let raw = inspect(&file.path()).await;
+    assert_eq!(
+        number(&raw, "SELECT COUNT(*) FROM not_balance WHERE balance < 0").await,
+        0
+    );
+    assert_eq!(
+        number(
+            &raw,
+            "SELECT SUM(amount) FROM not_transaction WHERE reason IN ('TIP_SENT', 'TIP_RECEIVED')"
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        number(
+            &raw,
+            "SELECT COUNT(*) FROM not_transaction WHERE event_key LIKE 'transfer:same:%'"
+        )
+        .await,
+        2
+    );
+    assert_eq!(trade_count(&raw).await, 2);
+    raw.close().await.unwrap();
+    first_db.close().await.unwrap();
+    second_db.close().await.unwrap();
 }
 
 #[tokio::test]

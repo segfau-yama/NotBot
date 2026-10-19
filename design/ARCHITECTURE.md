@@ -58,7 +58,7 @@ Value Objectは値を表す型、完全コンストラクタは生成時に必�
 | ドメインの入力・結果 | `Actor`、`NewShopItem`、`NewLedgerEntry`、`UserBalance`、`PurchaseQuote`、`PurchaseResult`、`TradeResult`。SDK形式を持たない検証済みのデータ。 |
 | インフラのSQLite操作処理 | `NotUseCase`、`ShopUseCase`。既存の操作を再利用し、具体的なSQLite実装を呼ぶ。名前のUseCaseは独立した層を意味しない。 |
 | インフラのDB処理 | `SqliteDatabaseAccess`、`SqliteSession`、`DatabaseError`。SeaORMで照会・INSERT・一括確定し、その場で共通型へ変換する。 |
-| インフラのDiscord処理 | `discord/`。Poiseのコマンド定義・引数解析・返信を使い、SerenityでREST認証・キャッシュ・権限計算を行う。公開・配送は後続工程で追加する。 |
+| インフラのDiscord処理 | `discord/`。Poiseのコマンド定義・引数解析・返信を使い、SerenityでREST認証・キャッシュ・権限計算を行う。P08でDM出品・商品公開・再投稿、P09で購入確認・決済・配送・無料再送を接続済み。 |
 | インフラのファイル処理 | `store_content`、`StoredContent`。永続保存の成功を表す値は保存処理からだけ生成し、未保存のメタデータで代用しない。 |
 | インフラの設定・失敗 | `Config`、`UseCaseError`、ファイルI/Oのエラー。ドメインの金額・値のエラーはドメインに残す。 |
 
@@ -75,7 +75,7 @@ DBはSQLite、DiscordはPoise＋Serenityの具体実装を使う。単一実装�
 - 残高確認から追記まで同じImmediateトランザクションを使い、購入・売上、返金・売上取消を一括確定する。
 - 同じ依頼IDでは確定済みの内容を照合し、再課金しない。結果不明なら新しいIDでやり直さない。
 - Discord API・ファイルI/OはDBトランザクションの外で実行する。ファイル配送直前に本人・同じギルド・未返金の購入権限を再確認する。
-- コンテンツ配送失敗は無料再送で復旧する。自動返金せず、購入履歴と完成ファイルを保持する。ロール販売の返金・復旧はP13で扱う。
+- コンテンツ配送失敗は無料再送で復旧する。自動返金せず、購入履歴と完成ファイルを保持する。P13のロール販売はCOMMIT後に付与・保有照合を行い、未付与を確認できれば返金を試みる。状態不明・返金不能なら購入権限を保持し、再照合・再起動で復旧する。
 
 操作処理とDB処理は同じインフラ層内でも関数・モジュールを分ける。層を減らすためにDiscordイベントへSQLや決済手順をすべて埋め込む必要はない。
 
@@ -85,14 +85,28 @@ DBはSQLite、DiscordはPoise＋Serenityの具体実装を使う。単一実装�
 |---|---|
 | `src/domain.rs` | ドメイン。共通型・値の不変条件。 |
 | `src/infrastructure/sqlite/not.rs`・`shop.rs` | 既存の残高・商品・購入・返金の操作処理。 |
-| `src/infrastructure/sqlite/mod.rs`・`001_initial.sql` | SeaORM・取引境界・DB変換・初期SQL。 |
-| `src/infrastructure/discord/mod.rs` | Poiseの共有データ・Context・構築、コマンド登録、接続・終了。 |
-| `src/infrastructure/discord/commands.rs` | `#[poise::command]` による `/not` の定義と操作処理の呼出し。 |
-| `src/infrastructure/discord/events.rs` | 接続イベントと共通のエラー返信。 |
+| 各 `mod.rs` | モジュール宣言と型・関数の再公開。実装は役割ごとのファイルへ置く。 |
+| `src/infrastructure/sqlite/database.rs`・`001_initial.sql` | SQLite接続・初期化・セッション開始、初期SQL。 |
+| `src/infrastructure/sqlite/session.rs` | トランザクションの保持・失敗時の取消・確定。 |
+| `src/infrastructure/sqlite/ledger.rs`・`items.rs` | 残高・取引のSQL、商品・公開記録のSQLと行の読出し。 |
+| `src/infrastructure/sqlite/rewards.rs`・`002_rewards.sql` | 報酬の処理済み判定・制限・処理結果の追記と既存DBへの移行。 |
+| `src/infrastructure/sqlite/error.rs` | DBエラーの分類・変換。 |
+| `src/infrastructure/discord/bot.rs` | Poiseの構築、コマンド登録、接続・終了。 |
+| `src/infrastructure/discord/data.rs` | Poiseの共有データ・Context。 |
+| `src/infrastructure/discord/commands.rs` | `#[poise::command]` による `/not`・`/content add` の定義と操作処理の呼出し。 |
+| `src/infrastructure/discord/events.rs` | 接続イベント、ボタンの先行defer・振分けと共通のエラー返信。 |
 | `src/infrastructure/discord/services.rs` | 所属・権限の認証、入力の変換、ギルド候補。 |
-| `src/infrastructure/discord/content.rs` | 非公開ファイルの具体的な永続保存。 |
+| `src/infrastructure/discord/content.rs` | 添付取得と非公開ファイルの永続保存・上限付き読出し。 |
+| `src/infrastructure/discord/listings.rs` | 出品下書き・確認ボタン・商品公開と既存商品による再投稿。 |
+| `src/infrastructure/discord/posting.rs` | DM添付・サーバー選択・フォーム入力を既存の出品プレビューへ接続。 |
+| `src/infrastructure/discord/purchases.rs` | 購入確認の消費、決済・結果復元、購入一覧・DM配送・無料再送。 |
+| `src/infrastructure/discord/management.rs` | 商品変更・削除・再投稿・返金のPoiseコマンドと既存操作の接続。 |
+| `src/infrastructure/discord/rewards.rs` | 投稿・返信・リアクションの所属・Bot・自己操作を照合し、報酬を付与。 |
+| `src/infrastructure/discord/roles.rs` | 既存ロールの登録・権限と階層の照合、決済後の付与・保有確認、未付与の返金、起動時の再照合・管理者返金時の解除。 |
+| `src/infrastructure/discord/test_support.rs` | 出品・購入のテストで共用するローカルHTTPと実SQLiteの準備。テスト時のみ使用。 |
 | `src/infrastructure/config.rs` | 起動設定の読込。 |
-| `src/infrastructure/mod.rs` | モジュール公開、共通エラー、`StoredContent` と配送サイズ上限。 |
+| `src/infrastructure/error.rs` | 共通エラーと操作エラー。 |
+| `src/infrastructure/stored_content.rs` | `StoredContent` と配送サイズ上限。 |
 
 [JadeMusic](https://github.com/segfau-yama/JadeMusic/tree/main/src)の `commands.rs`・`events.rs`・`services.rs` に合わせ、Discord内を用途で分ける。Poiseのコマンド定義から登録情報を生成し、手書きのサブコマンド振分け・オプション取得・候補返信は持たない。SerenityはPoiseの基盤として引き続き使う。[Poiseのコマンド定義](https://docs.rs/poise/0.7.1/poise/)
 
@@ -104,21 +118,39 @@ src/
   infrastructure/
     mod.rs
     config.rs
+    error.rs
+    stored_content.rs
     sqlite/
       mod.rs
+      database.rs
+      error.rs
+      items.rs
+      ledger.rs
       not.rs
+      rewards.rs
+      session.rs
       shop.rs
       001_initial.sql
+      002_rewards.sql
     discord/
       mod.rs
+      bot.rs
       commands.rs
+      data.rs
       events.rs
       services.rs
       content.rs
+      listings.rs
+      posting.rs
+      purchases.rs
+      management.rs
+      rewards.rs
+      roles.rs
+      test_support.rs
   lib.rs
   main.rs
 ```
 
-`StoredContent` はファイル保存とSQLiteの商品操作が共有するインフラの値なので、共通の `mod.rs` に置く。SQLite側からDiscordモジュールを参照する必要はない。ドメイン型・SQL・取引境界はこの配置変更で書き換えない。
+`StoredContent` はファイル保存とSQLiteの商品操作が共有するインフラの値なので、`infrastructure/stored_content.rs` に置き、`mod.rs` から再公開する。SQLite側からDiscordモジュールを参照する必要はない。ドメイン型・SQL・取引境界はこの配置変更で書き換えない。
 
 工程・実装済み範囲・検証結果は [IMPLEMENTATION.md](IMPLEMENTATION.md)で確認する。アプリケーション層や追加の抽象化は、操作の共用など実際の変更理由が生じた段階で検討する。

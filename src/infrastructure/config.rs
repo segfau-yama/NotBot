@@ -63,6 +63,10 @@ impl Config {
     pub fn shop_channel(&self, guild_id: GuildId) -> Option<ChannelId> {
         self.shop_channels.get(&guild_id).copied()
     }
+
+    pub fn shop_channels(&self) -> &HashMap<GuildId, ChannelId> {
+        &self.shop_channels
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
