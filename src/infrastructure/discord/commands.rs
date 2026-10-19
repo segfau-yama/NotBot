@@ -153,7 +153,7 @@ pub async fn transfer(
 #[poise::command(
     slash_command,
     subcommands("add", "purchases", "update", "delete", "republish", "refund"),
-    install_context = "Guild",
+    install_context = "Guild|User",
     interaction_context = "BotDm"
 )]
 pub async fn content(_: Context<'_>) -> Result<(), Error> {

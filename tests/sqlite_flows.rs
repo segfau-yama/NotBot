@@ -579,6 +579,129 @@ fn target(value: i64) -> Balance {
 }
 
 #[tokio::test]
+async fn voice_rewards_keep_daily_caps_replays_and_atomicity_without_a_schema_change() {
+    let file = TestDatabase::new();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let other_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    let other_not = NotUseCase::new(other_db.clone());
+    let start = UNIX_EPOCH + Duration::from_secs(54_000);
+    let first = not
+        .grant_voice_reward(buyer(), start)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.amount().get(), 1);
+    assert_eq!(
+        not.grant_voice_reward(buyer(), start + Duration::from_secs(59))
+            .await
+            .unwrap(),
+        Some(first.clone())
+    );
+    let minute = start + Duration::from_secs(60);
+    let (a, b) = tokio::join!(
+        not.grant_voice_reward(buyer(), minute),
+        other_not.grant_voice_reward(buyer(), minute)
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    for minute in 2..300 {
+        assert!(
+            not.grant_voice_reward(buyer(), start + Duration::from_secs(minute * 60))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(
+        not.grant_voice_reward(buyer(), start + Duration::from_secs(300 * 60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(300));
+    other_db.close().await.unwrap();
+    db.close().await.unwrap();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let not = NotUseCase::new(db.clone());
+    assert!(
+        not.grant_voice_reward(buyer(), start + Duration::from_secs(400 * 60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        not.grant_voice_reward(buyer(), start).await.unwrap(),
+        Some(first)
+    );
+    let midnight = start + Duration::from_secs(86_400);
+    assert!(
+        not.grant_voice_reward(buyer(), midnight - Duration::from_secs(1))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        not.grant_voice_reward(buyer(), midnight)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(301));
+    let other_guild = Actor::new(GuildId::try_from(101).unwrap(), buyer().user_id(), false);
+    assert!(
+        not.grant_voice_reward(other_guild, start)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        not.grant_voice_reward(admin(), start)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let raw = inspect(&file.path()).await;
+    for fail_commit in [false, true] {
+        raw.execute_unprepared(if fail_commit {
+            "CREATE TABLE voice_guard (code TEXT REFERENCES transaction_reason(code) DEFERRABLE INITIALLY DEFERRED);
+             CREATE TRIGGER reject_voice AFTER INSERT ON not_transaction WHEN NEW.event_key LIKE 'voice:%'
+             BEGIN INSERT INTO voice_guard VALUES ('UNKNOWN'); END;"
+        } else {
+            "CREATE TRIGGER reject_voice BEFORE INSERT ON not_transaction WHEN NEW.event_key LIKE 'voice:%'
+             BEGIN SELECT RAISE(ABORT, 'injected'); END;"
+        }).await.unwrap();
+        let earned = midnight + Duration::from_secs(if fail_commit { 120 } else { 60 });
+        let before = not.get_balance(buyer()).await.unwrap();
+        assert!(not.grant_voice_reward(buyer(), earned).await.is_err());
+        assert_eq!(not.get_balance(buyer()).await.unwrap(), before);
+        raw.execute_unprepared("DROP TRIGGER reject_voice")
+            .await
+            .unwrap();
+        assert!(
+            not.grant_voice_reward(buyer(), earned)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    not.adjust_balance(admin(), user(), target(i64::MAX), "voice-overflow")
+        .await
+        .unwrap();
+    assert_eq!(
+        not.grant_voice_reward(admin(), midnight).await,
+        Err(UseCaseError::Money(MoneyError::Overflow))
+    );
+    assert_eq!(
+        not.grant_voice_reward(buyer(), UNIX_EPOCH - Duration::from_secs(1))
+            .await,
+        Err(UseCaseError::InvalidRewardTime)
+    );
+    assert_eq!(number(&raw, "PRAGMA user_version").await, 2);
+    raw.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn rewards_migrate_preserve_decisions_enforce_jst_limits_and_survive_reopen() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();

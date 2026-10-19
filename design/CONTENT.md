@@ -24,7 +24,7 @@ Webストアを使わず、出品・商品表示・購入確認・ファイル�
 /content add title:資料集 description:使い方をまとめたPDF price:500 guild:対象サーバー file:資料.pdf
 ```
 
-`file` はDiscordの添付オプション、`guild` は出品先サーバーの候補から選ぶ。DMで使うコマンドはグローバル登録し、BotとのDMコンテキストを有効にする。ギルド限定コマンドはDMで使えない。[Discordのコマンド仕様](https://docs.discord.com/developers/interactions/application-commands)
+`file` はDiscordの添付オプション、`guild` は出品先サーバーの候補から選ぶ。`/content` はグローバル登録し、サーバー追加・ユーザー追加の両方と、BotとのDMコンテキストを有効にする。候補に表示されない場合はアプリのUser Installを有効にし、本人のアカウントへ追加してDMを開き直す。実行時の対象サーバーへの所属・権限照合は維持する。ギルド限定コマンドはDMで使えない。[Discordのコマンド仕様](https://docs.discord.com/developers/interactions/application-commands)
 
 コマンドなしの入口は次の流れとする。
 

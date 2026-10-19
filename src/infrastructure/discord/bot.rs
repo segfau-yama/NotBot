@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use serenity::all::{Client, Command, CreateAllowedMentions, GatewayIntents};
 use tokio::sync::Mutex;
 
-use super::{Data, commands, events, listings, roles};
+use super::{Data, commands, events, listings, roles, voice};
 use crate::infrastructure::{
     Error,
     config::Config,
@@ -11,7 +11,7 @@ use crate::infrastructure::{
 };
 
 pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), Error> {
-    let data = Data {
+    let data = Arc::new(Data {
         not: NotUseCase::new(database.clone()),
         shop: ShopUseCase::new(database.clone()),
         database,
@@ -22,7 +22,9 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         drafts: Mutex::new(HashMap::new()),
         uploads: Mutex::new(HashMap::new()),
         confirmations: Mutex::new(HashMap::new()),
-    };
+        voice: Mutex::new(HashMap::new()),
+    });
+    let voice_data = data.clone();
     let commands = vec![commands::not(), commands::content(), roles::role()];
     let registration = poise::builtins::create_application_commands(&commands);
     let framework = poise::Framework::builder()
@@ -43,7 +45,8 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         GatewayIntents::GUILDS
             | GatewayIntents::DIRECT_MESSAGES
             | GatewayIntents::GUILD_MESSAGES
-            | GatewayIntents::GUILD_MESSAGE_REACTIONS,
+            | GatewayIntents::GUILD_MESSAGE_REACTIONS
+            | GatewayIntents::GUILD_VOICE_STATES,
     )
     .framework(framework)
     .await?;
@@ -56,9 +59,12 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         Command::create_global_command(&client.http, command).await?;
     }
 
+    let http = client.http.clone();
+    let cache = client.cache.clone();
     let result: Result<(), Error> = tokio::select! {
         result = client.start() => result.map_err(Into::into),
         result = shutdown_signal() => result.map_err(Into::into),
+        _ = voice::run(&http, &cache, &voice_data) => Ok(()),
     };
     client.shard_manager.shutdown_all().await;
     result

@@ -2,7 +2,7 @@
 
 Nifty Online Tokensを管理するDiscord Botです。メッセージ・リアクションによるNOTの増減、ギルド内の残高・ランキング、Discord内で完結するコンテンツ売買を予定しています。
 
-P07〜P13のDiscord接続・残高操作、出品・購入・DM配送・無料再送、商品管理・返金、報酬・罰則・譲渡、ロール販売・復旧を実装しています。自動検証済み・実機確認待ちです。次はテスト用サーバーで各工程の実機確認を行います。
+P07〜P13のDiscord接続・残高操作、出品・購入・DM配送・無料再送、商品管理・返金、活動・通話の報酬・罰則・譲渡、ロール販売・復旧を実装しています。自動検証済み・実機確認待ちです。次はテスト用サーバーで各工程の実機確認を行います。
 
 ## 起動
 
@@ -112,15 +112,20 @@ DM候補にはBotと本人の所属を確認できたサーバーだけを表示
 | 他人の投稿にリアクションする | リアクションした人に1 NOT |
 | 自分の投稿にリアクションされる | 投稿者に10 NOT |
 | 自分の投稿に返信される | 返信先の投稿者に20 NOT |
+| サーバーの通話に参加する | 完了した1分ごとに1 NOT、1日最大300 NOT |
 | コンテンツ・ロール商品が購入される | 出品者に販売価格分 |
 
 DM・Bot・Webhook・システム投稿・自己リアクション・自己返信は活動報酬の対象外です。自己返信、BotやWebhookへの返信は投稿報酬も発生しません。通常の返信では投稿者と返信先にそれぞれ別種の報酬を判定します。各受取人のサーバー所属をRESTで確認し、投稿本文は読まず、メッセージID・投稿者・参照先の情報を使います。変更前に付与済みの1 NOTはそのまま保持し、同じイベントの再配信でも増額しません。新しい額はBot再起動後の未処理イベントに適用します。
 
-制限は**サーバー・受取人・報酬種別ごとに60秒に1回、1日100回まで**です。Botでの受付時刻を使い、日本時間00:00で日次上限をリセットします。日付が変わっても60秒の間隔は維持します。制限による見送りもDBに残し、そのイベントの再配信や日付変更後に付与し直しません。
+投稿・リアクション・返信の制限は**サーバー・受取人・報酬種別ごとに60秒に1回、1日100回まで**です。Botでの受付時刻を使い、日本時間00:00で日次上限をリセットします。日付が変わっても60秒の間隔は維持します。制限による見送りもDBに残し、そのイベントの再配信や日付変更後に付与し直しません。
+
+通話報酬は**サーバー・ユーザーごとに1日合計5時間分、最大300 NOT**です。日本時間00:00で上限をリセットし、再参加・チャンネル移動・Bot再起動でも当日の付与数を保持します。Botは通話に参加する必要がありません。Bot以外の参加者が対象で、1人だけの通話・ミュート中も含みます。退出時の1分未満は切り捨て、Bot停止・Gateway切断・所属確認失敗中の時間は遡って付与しません。起動・再接続時点ですでに通話にいる人も、その時点から計測します。日付は付与対象の1分を判定した時刻を使います。
 
 `NotUseCase.grant_reward(actor, reason, request_id, now)` は付与済みの取引を `Some(LedgerEntry)`、制限による見送りを `None` で返します。キーは `reward:{理由コード}:{元メッセージID}`、リアクションの場合は `reward:{理由コード}:{元メッセージID}-{リアクションした人のID}` です。絵文字はキーに含めず、取り外し・付け直し・別絵文字でも同じ結果を返します。日次上限・間隔・残高上限・処理済み判定と、種別に応じた報酬額の追記・処理結果の保存を同じImmediateトランザクションで確定します。返信・リアクションの各受取人の判定は独立しています。
 
-Gatewayは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS` を使います。Botには対象チャンネルの閲覧と「メッセージ履歴を読む」を許可してください。リアクション先、イベントに参照元がない返信先はRESTで取得します。取得できない場合は付与せずエラーを記録します。Message Content・Guild MembersなどのPrivileged Gateway Intentsは不要です。[イベントとIntent](https://docs.discord.com/developers/events/gateway#list-of-intents)、[Message Contentの対象フィールド](https://docs.discord.com/developers/events/gateway#message-content-intent)
+Gatewayは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS | GUILD_VOICE_STATES` を使います。Botには対象チャンネルの閲覧と「メッセージ履歴を読む」を許可してください。リアクション先、イベントに参照元がない返信先はRESTで取得します。取得できない場合は付与せずエラーを記録します。Message Content・Guild MembersなどのPrivileged Gateway Intentsは不要です。[イベントとIntent](https://docs.discord.com/developers/events/gateway#list-of-intents)、[通話状態のイベント](https://docs.discord.com/developers/events/gateway-events#voice-state-update)
+
+`NotUseCase.grant_voice_reward(actor, earned_at)` は確認済みの通話1分へ1 NOTを付与します。既存の `ADJUSTMENT` 履歴と `voice:{日本時間の日番号}:{ユーザーID}:{Unix分}` キーを使い、同じ分の復元・当日300回の上限・残高検証・追記を同じImmediateトランザクションで行います。表・依存・スキーマの追加はありません。付与結果が不明な場合は獲得時刻を保持し、翌分になっても同じキーで照合します。履歴の理由表示は既存の「管理者による残高調整」を共用し、`voice:` で通話報酬を識別します。
 
 自動検証では既存の実SQLite・ローカルHTTPのテストで、正負・0の調整、過大減算・整数上限超過、管理権限・対象所属、指定額の異なる依頼ID再利用、同時再試行、INSERT／COMMIT失敗時の取消、購入・返金・譲渡との残高競合を確認しています。実Discordでのコマンド反映・譲渡・増減指定・退会後の拒否は未確認です。テスト用サーバーで正の調整による加算、`amount:-100` による減算、残高50への `-100` の拒否と `-50` による0への減算、一般ユーザーの拒否を確認してください。
 
@@ -134,6 +139,9 @@ Gatewayは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS`
 | 別人のリアクションで実行者に1 NOT・投稿者に10 NOT。付け直し・別絵文字・Bot・自己操作では増えない | 未実施 |
 | 別人への返信で投稿者に5 NOT・返信先に20 NOT。Bot・Webhook・自己返信では増えない | 未実施 |
 | 上限到達後は増えず、日本時間00:00以降の新しいイベントで再開する。Bot再起動後も付与・見送り結果が残る | 未実施 |
+| 通話参加後60秒で1 NOT、退出後は増えず、再参加・チャンネル移動・ミュート中も条件どおり付与する。Botは対象外 | 未実施 |
+| 通話報酬は当日300 NOTまで。Bot再起動で上限が戻らず、日本時間00:00で翌日分へ切り替わる | 未実施 |
+| Bot停止・Gateway再接続後に過去の通話時間を補填せず、現在の参加者を再計測する | 未実施 |
 | サーバー間・種別間で制限が独立し、購入・返金・譲渡・罰則と併用しても残高が正しい | 未実施 |
 
 ## コンテンツと商品操作
@@ -151,11 +159,13 @@ Gatewayは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS`
 
 入力は本人ごとに1つ、5分間有効です。有効な添付の送り直し・`/content add`・取消・期限切れ・再起動で古い入力は失効します。フォームを閉じた場合や入力不正時は、元のボタンから期限内に入力し直せます。添付受信やフォーム送信だけではファイルを保存せず、P08と同じ最終プレビューへ進みます。
 
-現在のBotは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS` を使用します。DMの添付はMessage Content Intentの例外なので、Privileged Gateway Intentsは無効のままで使えます。[DiscordのGateway Intent・DMの例外](https://docs.discord.com/developers/events/gateway#message-content-intent)
+現在のBotは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS | GUILD_VOICE_STATES` を使用します。DMの添付はMessage Content Intentの例外なので、Privileged Gateway Intentsは無効のままで使えます。[DiscordのGateway Intent・DMの例外](https://docs.discord.com/developers/events/gateway#message-content-intent)
 
 P10の実機確認は未実施です。DM添付から公開・購入・配送までの操作、サーバー選択とフォーム表示、取消・期限切れ・退会・再起動後の拒否をテストギルドで確認してください。
 
 BotとのDMで従来のコマンドも使えます。
+
+`/content` はサーバー追加・ユーザー追加の両方に対応し、Bot本人とのDMで使えます。候補に出ない場合はDeveloper PortalのInstallationでUser Installと `applications.commands` を有効にし、アプリを自分のアカウントにも追加してからBotのDMを開き直してください。ユーザー追加後も、出品・購入・管理の対象サーバーへの所属と権限は実行時に確認します。[Discordのインストール先と実行場所](https://docs.discord.com/developers/interactions/application-commands#contexts)
 
 ```text
 /content add title:資料集 description:使い方をまとめたPDF price:500 guild:対象サーバー file:資料.pdf

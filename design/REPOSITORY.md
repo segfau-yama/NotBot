@@ -24,6 +24,7 @@ classDiagram
         +adjust_amount(actor, user_id, amount, request_id) LedgerEntry
         +transfer(actor, recipient, amount, request_id)
         +grant_reward(actor, reason, request_id, now) Option~LedgerEntry~
+        +grant_voice_reward(actor, earned_at) Option~LedgerEntry~
     }
     class ShopUseCase {
         <<infrastructure>>
@@ -85,6 +86,7 @@ I/Oは非同期の `Result<T, ...>` とする。公開・配送は確定後にDi
 - `find_purchase_by_confirmation` は本人・ギルドと確認IDのイベントキーを照合して確定済み結果を返す。再起動で未決済の確認が失われた場合にも使う。返金済みの結果を返しても再課金はせず、再送権限は別途確認する。
 - `refund` は元の購入と売上を取得し、それぞれの金額の符号を反転する。出品者の残高不足時は両行とも追記せず失敗させる。現在の商品価格は使わない。
 - 加減算・符号反転はchecked演算を使う。受取側も含め、増減後の残高が0以上かつ表現範囲内であることを確認する。
+- 通話は `grant_voice_reward(actor, earned_at)` で確認済みの1分へ1 NOTを付与する。日次上限はサーバー・受取人ごとに日本時間で300回。既存の `ADJUSTMENT` と `voice:{日番号}:{ユーザーID}:{Unix分}` キーで記録し、元取引の照合・当日の付与数・残高検証・追記を同じImmediateトランザクションで行う。管理者Actorへの昇格は行わない。Discordの `voice.rs` が通話中の確認・Bot除外・60秒の計測・結果不明時の同じ獲得時刻による再試行を担当する。
 - `event_key` は操作種別と依頼IDを含め、譲渡を `:sent`・`:received`、購入・返金を `:buyer`・`:seller` で区別する。処理済みなら依頼の主体・商品・金額と一致する既存の結果を返す。
 
 `NotUseCase` の残高・ランキング・調整を実装している。調整は管理権限を確認した後、`begin_write` → `adjust:{request_id}` の照合 → 現在残高の取得 → 差額の追記 → COMMITの順で行う。`target_balance` は `Balance` 型で受け取り、負数は生成時に拒否する。依頼IDは空白だけの値・制御文字を拒否する。同一キーの対象ユーザー・理由が異なる場合は `UseCaseError::RequestConflict` とする。

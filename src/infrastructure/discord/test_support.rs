@@ -398,6 +398,7 @@ pub(super) async fn setup(directory: &TestDirectory) -> Data {
         drafts: tokio::sync::Mutex::new(HashMap::new()),
         uploads: tokio::sync::Mutex::new(HashMap::new()),
         confirmations: tokio::sync::Mutex::new(HashMap::new()),
+        voice: tokio::sync::Mutex::new(HashMap::new()),
     }
 }
 

@@ -6,7 +6,7 @@ use std::{
 
 use tokio::sync::Mutex;
 
-use super::{listings, posting};
+use super::{listings, posting, voice};
 use crate::{
     domain::{ChannelId, GuildId, ItemId, PurchaseQuote},
     infrastructure::{
@@ -26,6 +26,8 @@ pub struct Data {
     pub(super) drafts: Mutex<HashMap<u64, listings::ListingDraft>>,
     pub(super) uploads: Mutex<HashMap<u64, posting::Upload>>,
     pub(super) confirmations: Mutex<HashMap<String, PurchaseQuote>>,
+    pub(super) voice:
+        Mutex<HashMap<(serenity::all::GuildId, serenity::all::UserId), voice::Attendance>>,
 }
 
 impl Data {
@@ -41,4 +43,4 @@ impl Data {
     }
 }
 
-pub type Context<'a> = poise::ApplicationContext<'a, Data, Error>;
+pub type Context<'a> = poise::ApplicationContext<'a, Arc<Data>, Error>;

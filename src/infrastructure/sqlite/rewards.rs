@@ -4,6 +4,32 @@ use super::{DatabaseError, SqliteSession};
 use crate::domain::{Actor, LedgerEntryId, LedgerReason, UserId};
 
 impl SqliteSession {
+    pub(super) async fn count_voice_rewards(
+        &mut self,
+        actor: Actor,
+        prefix: &str,
+    ) -> Result<i64, DatabaseError> {
+        let transaction = self.take_transaction()?;
+        let guild = actor.guild_id().to_string();
+        let user = actor.user_id().to_string();
+        let pattern = format!("{prefix}%");
+        let result = async {
+            transaction
+                .query_one_raw(raw_sql!(
+                    Sqlite,
+                    "SELECT COUNT(*) AS total FROM not_transaction
+                 WHERE guild_id = {guild} AND user_id = {user}
+                   AND reason = 'ADJUSTMENT' AND amount = 1 AND event_key LIKE {pattern}"
+                ))
+                .await?
+                .ok_or(DatabaseError::InvalidData)?
+                .try_get("", "total")
+                .map_err(Into::into)
+        }
+        .await;
+        self.finish_operation(transaction, result).await
+    }
+
     pub(super) async fn find_reward_event(
         &mut self,
         actor: Actor,

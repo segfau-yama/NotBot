@@ -37,6 +37,7 @@ fn content_command_has_dm_context_and_validated_attachment_and_integer_string_op
         poise::builtins::create_application_commands(&[super::super::commands::content()]);
     let command = to_value(&commands[0]).unwrap();
     assert_eq!(command["contexts"], json!([1]));
+    assert_eq!(command["integration_types"], json!([0, 1]));
     let options = command["options"][0]["options"].as_array().unwrap();
     assert_eq!(options.len(), 5);
     for option in options {

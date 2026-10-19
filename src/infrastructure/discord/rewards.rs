@@ -8,7 +8,11 @@ use crate::{
     infrastructure::Error,
 };
 
-async fn participant(http: &Http, guild: GuildId, user: UserId) -> Result<Option<Actor>, Error> {
+pub(super) async fn participant(
+    http: &Http,
+    guild: GuildId,
+    user: UserId,
+) -> Result<Option<Actor>, Error> {
     let member =
         match http.get_member(guild, user).await {
             Ok(member) => member,

@@ -10,6 +10,7 @@ mod purchases;
 mod rewards;
 mod roles;
 mod services;
+mod voice;
 
 pub use bot::run;
 pub use data::{Context, Data};

@@ -31,6 +31,7 @@ P08の前に、コードも [ARCHITECTURE.md](ARCHITECTURE.md)のドメイン・
 | P10 | ファイル送信とフォームによる出品 | P08、P09 | 実機確認待ち |
 | P11 | 商品管理・返金の操作とコンテンツ売買の通し確認 | P09、P10 | 実機確認待ち |
 | P12 | 投稿・リアクションの報酬、罰則、NOT譲渡 | P03、P07 | 実機確認待ち |
+| 通話報酬 | 通話1分ごとに1 NOT、1日5時間分・最大300 NOT | P12 | 実機確認待ち |
 | P13 | 既存設計のロール販売・復旧 | P06、P07 | 実機確認待ち |
 
 P00〜P11でDiscord内のコンテンツ売買を完成させる。P12は既存のNOT機能、P13は既存設計のロール販売の後続工程で、コンテンツ売買の完成条件には含めない。状態は「未着手／実装中／完了／実機確認待ち」とし、変更時には検証結果も記録する。
@@ -87,7 +88,11 @@ P13実装・検証記録（2026-10-19）：`ShopUseCase.create_role` とロー�
 
 管理コマンドの統合（2026-10-19）：ユーザーの指示で `/not penalize` を削除し、`/not adjust user:対象 amount:正負の整数` に統合した。目標残高の `balance` 引数を増減額の `amount` に変更し、正数・明示的な+・負数・0と符号付き64bit整数の上下限を文字列で受け付ける。固定100 NOTの罰則処理を `NotUseCase.adjust_amount` へ置き換え、管理権限・対象所属・増減後の非負と整数範囲を検証する。過大減算は切り詰めず拒否する。`adjust-amount:{request_id}` で対象・理由・額を照合し、同じImmediateトランザクションで残高検証と `ADJUSTMENT` の追記を行う。既存の目標残高調整APIと旧 `TIMEOUT`・`adjust:`・`penalty:` の履歴は保持する。既存テストを更新し、正負・0、権限拒否、異なる額のID再利用、再起動後の復元、同時再試行、購入・譲渡との競合、INSERT／COMMIT失敗時の全体取消、負の残高と上限超過の拒否を確認した。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全79件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。設定・依存・スキーマ・テスト件数の追加はない。実Discordでの新しい引数・旧サブコマンドの削除は未確認のため、実機確認待ちは維持する。次はBotを再起動してコマンド登録を更新し、READMEの手順で確認する。
 
-未着手の実装工程はない。P07〜P13の実機確認をREADMEの手順で行い、結果を記録する。
+DMのコンテンツコマンド登録の修正（2026-10-19）：DMで `/content` が表示されない報告を受け、Discord APIで実登録を読み取った。グローバル登録・`contexts=[1]`・管理者限定なしは確認できたが、`integration_types=[0]` でユーザー追加には登録されていなかった。アプリ本体は両追加方式に対応しているため、`/content` の `install_context` を `Guild|User` に変更した。既存の登録定義テストへ両インストール先の確認を追加し、`env -u DISCORD_TOKEN cargo test --offline --locked content_command_has_dm_context --quiet`（既存1件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。Discord上でも当該コマンドの登録先を更新し、APIで `contexts=[1]`・`integration_types=[0,1]`・6つのサブコマンド・管理者限定なしを確認した。READMEとコンテンツ設計に本人のアカウントへの追加手順を記録した。DM画面での候補表示と実行は未確認のため、実機確認待ちは維持する。次は本人のアカウントへ追加した上でBotのDMを開き直し、`/content add`・`purchases` を確認する。
+
+通話報酬の追加（2026-10-19）：ユーザーが上限を1日合計5時間と指定したため、サーバー・ユーザーごとに1分1 NOT・日次最大300 NOT、日本時間00:00リセットを実装した。`voice.rs` で入退室・チャンネル移動・起動時の既存参加者・再接続を扱い、60秒を計測してRESTで所属・Botを確認する。Botは通話へ参加しない。退出・Gateway切断では計測を破棄し、停止中・確認できない時間を遡って付与しない。ミュート・1人の通話も対象とし、退出時の1分未満は切り捨てる。既存の `ADJUSTMENT` と `voice:` キーで付与・当日上限・重複排除を同じImmediateトランザクションで行い、失敗・結果不明時には同じ獲得時刻で照合する。履歴の理由表示は既存の残高調整を共用する。`GUILD_VOICE_STATES` を追加し、共有データをArcでコマンドと報酬ループから参照する。ループはGateway・終了シグナルと同じselectで管理し、終了後に残さない。既存の実SQLite・HTTP基盤へ2件を追加し、59.999秒／60秒、移動・ミュート・退出・再参加・Bot除外・DB再接続、同じ分の同時処理・300回上限・日本時間の日付境界・ユーザー／サーバー分離、INSERT／COMMIT失敗・結果不明の復元・残高上限超過を確認した。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全81件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。依存・設定・テーブル・ドメイン型・DB移行は追加していない。実Discordの通話イベント・自動付与・再接続時の実動作は未確認のため、通話報酬は実機確認待ち。次はBot再起動後にREADMEの通話確認表を実施する。
+
+未着手の実装工程はない。P07〜P13と通話報酬の実機確認をREADMEの手順で行い、結果を記録する。
 
 ```text
 @Ponytail README.md の P07〜P13 の実機確認を進めてください。

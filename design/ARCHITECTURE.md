@@ -102,6 +102,7 @@ DBはSQLite、DiscordはPoise＋Serenityの具体実装を使う。単一実装�
 | `src/infrastructure/discord/purchases.rs` | 購入確認の消費、決済・結果復元、購入一覧・DM配送・無料再送。 |
 | `src/infrastructure/discord/management.rs` | 商品変更・削除・再投稿・返金のPoiseコマンドと既存操作の接続。 |
 | `src/infrastructure/discord/rewards.rs` | 投稿・返信・リアクションの所属・Bot・自己操作を照合し、報酬を付与。 |
+| `src/infrastructure/discord/voice.rs` | 通話の入退室・起動時の状態を保持し、60秒経過で1 NOTを付与。退出・切断で計測を終了し、未確定の付与は元の獲得時刻で照合する。 |
 | `src/infrastructure/discord/roles.rs` | 既存ロールの登録・権限と階層の照合、決済後の付与・保有確認、未付与の返金、起動時の再照合・管理者返金時の解除。 |
 | `src/infrastructure/discord/test_support.rs` | 出品・購入のテストで共用するローカルHTTPと実SQLiteの準備。テスト時のみ使用。 |
 | `src/infrastructure/config.rs` | 起動設定の読込。 |
@@ -145,6 +146,7 @@ src/
       purchases.rs
       management.rs
       rewards.rs
+      voice.rs
       roles.rs
       test_support.rs
   lib.rs

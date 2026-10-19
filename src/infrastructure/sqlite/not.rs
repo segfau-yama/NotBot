@@ -79,6 +79,55 @@ impl NotUseCase {
         Ok(entry)
     }
 
+    /// Discord側が確認した完了1分へ付与。獲得時刻を再試行でも変えない。
+    pub async fn grant_voice_reward(
+        &self,
+        actor: Actor,
+        earned_at: SystemTime,
+    ) -> Result<Option<LedgerEntry>, UseCaseError> {
+        let minute = earned_at
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| i64::try_from(elapsed.as_secs() / 60).ok())
+            .filter(|minute| minute.checked_add(540).is_some())
+            .ok_or(UseCaseError::InvalidRewardTime)?;
+        let day = (minute + 540) / 1440;
+        let prefix = format!("voice:{day}:{}:", actor.user_id());
+        let key = format!("{prefix}{minute}");
+        let mut session = self.database.begin_write().await?;
+        if let Some(entry) = session.find_by_event_key(actor.guild_id(), &key).await? {
+            if entry.user_id() != actor.user_id()
+                || entry.reason() != LedgerReason::Adjustment
+                || entry.amount().get() != 1
+            {
+                return Err(UseCaseError::RequestConflict);
+            }
+            session.commit().await?;
+            return Ok(Some(entry));
+        }
+        if session.count_voice_rewards(actor, &prefix).await? >= 300 {
+            session.commit().await?;
+            return Ok(None);
+        }
+        let amount = NotAmount::new(1);
+        session
+            .get_balance(actor.guild_id(), actor.user_id())
+            .await?
+            .apply(amount)?;
+        // shortcut: 通話はADJUSTMENTとvoice:キーで記録する。専用の理由表示が必要ならDB制約も移行する。
+        let entry = session
+            .append_entry(NewLedgerEntry::try_new(
+                actor.guild_id(),
+                actor.user_id(),
+                amount,
+                LedgerReason::Adjustment,
+                key,
+            )?)
+            .await?;
+        session.commit().await?;
+        Ok(Some(entry))
+    }
+
     /// Noneは制限による見送り。同じイベントは後日も元の付与／見送り結果を返す。
     pub async fn grant_reward(
         &self,

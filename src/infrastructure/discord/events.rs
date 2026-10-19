@@ -1,4 +1,4 @@
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use serenity::all::*;
 
@@ -8,10 +8,43 @@ use crate::infrastructure::Error;
 pub(super) async fn handle(ctx: &Context, event: &FullEvent, data: &Data) -> Result<(), Error> {
     let now = SystemTime::now();
     if let FullEvent::Ready { .. } = event {
+        data.voice.lock().await.clear();
         println!("Discordに接続しました。/not・/content・/role が利用できます。");
     }
     if let FullEvent::GuildCreate { guild, .. } = event {
+        super::voice::seed(data, guild.id, &guild.voice_states, Instant::now()).await;
         super::roles::reconcile(&ctx.http, data, guild.id).await?;
+    }
+    if let FullEvent::VoiceStateUpdate { new, .. } = event
+        && let Some(guild) = new.guild_id
+    {
+        super::voice::update(data, guild, new, Instant::now()).await;
+    }
+    if let FullEvent::GuildDelete { incomplete, .. } = event {
+        data.voice
+            .lock()
+            .await
+            .retain(|(guild, _), _| *guild != incomplete.id);
+    }
+    if let FullEvent::ShardStageUpdate { event } = event
+        && event.new != serenity::gateway::ConnectionStage::Connected
+    {
+        data.voice.lock().await.clear();
+    }
+    if let FullEvent::Resume { .. } = event {
+        let guilds: Vec<_> = ctx
+            .cache
+            .guilds()
+            .into_iter()
+            .filter_map(|id| {
+                ctx.cache
+                    .guild(id)
+                    .map(|guild| (id, guild.voice_states.clone()))
+            })
+            .collect();
+        for (guild, states) in guilds {
+            super::voice::seed(data, guild, &states, Instant::now()).await;
+        }
     }
     if let FullEvent::Message { new_message } = event {
         super::rewards::message(&ctx.http, data, new_message, now).await?;
@@ -80,7 +113,7 @@ pub(super) async fn handle_component(
     Ok(())
 }
 
-pub(super) async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
+pub(super) async fn on_error(error: poise::FrameworkError<'_, std::sync::Arc<Data>, Error>) {
     if let poise::FrameworkError::EventHandler { event, error, .. } = &error {
         eprintln!(
             "Discord: イベントの処理に失敗しました。event={} {}",
