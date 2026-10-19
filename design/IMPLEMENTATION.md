@@ -96,6 +96,8 @@ DMのコンテンツコマンド登録の修正（2026-10-19）：DMで `/conten
 
 サーバー名表示（2026-10-20）：残高・ランキング・残高調整・譲渡・購入一覧のサーバーID表示を、Discordから取得した現在の名称へ変更した。名前取得は `services::guild_name` を共用し、調整・譲渡ではDB確定前に取得する。購入一覧のコマンド・ページ切替・ロール購入一覧の呼び出し元も対応した。既存の購入一覧テストで初回とページ切替後の名称表示を確認し、テスト件数は増やしていない。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全82件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。README・表示方針・進捗表を更新した。実Discordでの名称表示・名称変更後の反映は未確認のため、P07・P09は実機確認待ち。次はBotを再起動し、サーバー内とDMで残高・ランキング・購入一覧の名称を確認する。
 
+NOTコマンドのEmbed表示（2026-10-20）：`/not balance`・`ranking`・`adjust`・`transfer` の成功返信を、既存のSerenity・PoiseのビルダーでEmbedへ変更した。色・サーバー名の表示を揃え、残高・増減額・譲渡額を太字で強調した。ランキングは上位10人の順位・ユーザー・金額を項目ごとに分け、履歴なしも案内する。調整・譲渡の取引IDはフッターへ移した。本人向け返信・通知抑制・既存の認証と金額処理を引き継ぎ、依存・抽象化・テストを追加していない。`env -u DISCORD_TOKEN cargo test --offline --locked --all-targets --quiet`（全82件）、`cargo fmt --all -- --check`、`cargo clippy --offline --locked --all-targets -- -D warnings`、`git diff --check` が成功。README・表示方針・進捗表を更新した。実Discordの画面表示は未確認のため、P07は実機確認待ち。次はBotを再起動し、サーバー内とDMで残高・ランキング、管理者調整・譲渡のEmbedと金額・取引IDを確認する。
+
 未着手の実装工程はない。P07〜P13と通話報酬の実機確認をREADMEの手順で行い、結果を記録する。
 
 ```text
