@@ -1,0 +1,12 @@
+[package]
+name = "notbot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+
+[dependencies]
+poise = { version = "=0.7.1", default-features = false, features = ["cache"] }
+sea-orm = { version = "=2.0.4", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-sqlite"] }
+serenity = { version = "=0.12.5", default-features = false, features = ["builder", "cache", "client", "gateway", "model", "rustls_backend"] }
+thiserror = "=2.0.21"
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
