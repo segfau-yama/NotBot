@@ -1,4 +1,4 @@
-use serenity::all::{Attachment, User};
+use serenity::all::{Attachment, Colour, CreateEmbed, CreateEmbedFooter, User};
 
 use super::{Context, services};
 use crate::infrastructure::Error;
@@ -28,12 +28,20 @@ pub async fn balance(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let actor = services::actor(ctx, guild.as_deref()).await?;
+    let guild_name = services::guild_name(ctx.http(), actor.guild_id()).await?;
     let balance = ctx.data().not.get_balance(actor).await?;
-    ctx.say(format!(
-        "サーバー {}\nあなたの残高: {} NOT",
-        actor.guild_id(),
-        balance.get()
-    ))
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("NOT残高")
+                    .colour(Colour::BLURPLE)
+                    .field("サーバー", guild_name, false)
+                    .field("ユーザー", format!("<@{}>", ctx.author().id), true)
+                    .field("所持NOT", format!("**{} NOT**", balance.get()), true),
+            )
+            .ephemeral(true),
+    )
     .await?;
     Ok(())
 }
@@ -50,20 +58,24 @@ pub async fn ranking(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let actor = services::actor(ctx, guild.as_deref()).await?;
+    let guild_name = services::guild_name(ctx.http(), actor.guild_id()).await?;
     let ranking = ctx.data().not.get_ranking(actor, 10).await?;
-    let mut result = format!("サーバー {} のNOTランキング（上位10人）", actor.guild_id());
+    let mut embed = CreateEmbed::new()
+        .title("NOTランキング（上位10人）")
+        .colour(Colour::BLURPLE)
+        .field("サーバー", guild_name, false);
     if ranking.is_empty() {
-        result.push_str("\n取引履歴はまだありません。");
+        embed = embed.description("取引履歴はまだありません。");
     }
     for (index, row) in ranking.iter().enumerate() {
-        result.push_str(&format!(
-            "\n{}. <@{}>: {} NOT",
-            index + 1,
-            row.user_id(),
-            row.balance().get()
-        ));
+        embed = embed.field(
+            format!("{}位", index + 1),
+            format!("<@{}> — **{} NOT**", row.user_id(), row.balance().get()),
+            false,
+        );
     }
-    ctx.say(result).await?;
+    ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
+        .await?;
     Ok(())
 }
 
@@ -84,6 +96,7 @@ pub async fn adjust(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let actor = services::actor(ctx, guild.as_deref()).await?;
+    let guild_name = services::guild_name(ctx.http(), actor.guild_id()).await?;
     let target = services::adjustment_target(ctx.http(), actor, user.id).await?;
     let amount = services::parse_amount(&amount)?;
     println!(
@@ -98,13 +111,23 @@ pub async fn adjust(
         .not
         .adjust_amount(actor, target, amount, &ctx.interaction.id.to_string())
         .await?;
-    ctx.say(format!(
-        "サーバー {}\n<@{}> に {:+} NOTの調整を記録しました。取引ID: {}",
-        actor.guild_id(),
-        user.id,
-        entry.amount().get(),
-        entry.id()
-    ))
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("NOT残高の調整")
+                    .colour(Colour::BLURPLE)
+                    .field("サーバー", guild_name, false)
+                    .field("対象ユーザー", format!("<@{}>", user.id), true)
+                    .field(
+                        "増減額",
+                        format!("**{:+} NOT**", entry.amount().get()),
+                        true,
+                    )
+                    .footer(CreateEmbedFooter::new(format!("取引ID: {}", entry.id()))),
+            )
+            .ephemeral(true),
+    )
     .await?;
     Ok(())
 }
@@ -123,6 +146,7 @@ pub async fn transfer(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let actor = services::actor(ctx, guild.as_deref()).await?;
+    let guild_name = services::guild_name(ctx.http(), actor.guild_id()).await?;
     let target = services::member_target(ctx.http(), actor, user.id).await?;
     println!(
         "not transfer_requested guild={} sender={} recipient={} amount={} request={}",
@@ -137,14 +161,23 @@ pub async fn transfer(
         .not
         .transfer(actor, target, amount, &ctx.interaction.id.to_string())
         .await?;
-    ctx.say(format!(
-        "サーバー {}\n<@{}> に {} NOTを譲渡しました。送信取引ID: {} / 受取取引ID: {}",
-        actor.guild_id(),
-        target,
-        amount,
-        sent.id(),
-        received.id()
-    ))
+    ctx.send(
+        poise::CreateReply::default()
+            .embed(
+                CreateEmbed::new()
+                    .title("NOTの譲渡")
+                    .colour(Colour::BLURPLE)
+                    .field("サーバー", guild_name, false)
+                    .field("受取人", format!("<@{target}>"), true)
+                    .field("譲渡額", format!("**{amount} NOT**"), true)
+                    .footer(CreateEmbedFooter::new(format!(
+                        "送信取引ID: {} / 受取取引ID: {}",
+                        sent.id(),
+                        received.id()
+                    ))),
+            )
+            .ephemeral(true),
+    )
     .await?;
     Ok(())
 }
@@ -217,7 +250,7 @@ pub async fn purchases(
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
     let actor = services::actor(ctx, Some(&guild)).await?;
-    let (text, buttons) = super::purchases::list(ctx.data(), actor, 0).await?;
+    let (text, buttons) = super::purchases::list(ctx.http(), ctx.data(), actor, 0).await?;
     ctx.send(
         poise::CreateReply::default()
             .content(text)

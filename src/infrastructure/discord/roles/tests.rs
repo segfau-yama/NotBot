@@ -91,11 +91,11 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
             .unwrap(),
         item
     );
-    assert!(
+    assert_eq!(
         data.shop
             .prepare_purchase(seller(), item.id(), "self", SystemTime::now())
-            .await
-            .is_err()
+            .await,
+        Err(UseCaseError::InsufficientBalance)
     );
     for (index, field, value) in [
         (0, "managed", json!(true)),
@@ -145,7 +145,7 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
             .is_err()
     );
     assert!(
-        purchases::list(&data, buyer(), 0)
+        purchases::list(&http, &data, buyer(), 0)
             .await
             .unwrap()
             .0
@@ -179,6 +179,100 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
             .unwrap()
             .iter()
             .any(|option| option["name"] == "recover")
+    );
+    data.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
+    let (_directory, data, item) = scenario().await;
+    let mock = MockDiscord::new();
+    let http = mock.http();
+    data.not
+        .adjust_balance(
+            seller(),
+            seller().user_id(),
+            Balance::try_from(i64::MAX).unwrap(),
+            "seller-fund",
+        )
+        .await
+        .unwrap();
+    let mut click = component(&format!("content:buy:100:{}", item.id()), 999);
+    click.guild_id = Some(GuildId::new(100));
+    click.id = InteractionId::new(930);
+    purchases::handle_action(&http, &data, &click, SystemTime::now())
+        .await
+        .unwrap();
+    assert!(mock.posts().iter().any(|body| {
+        let payload: serenity::json::Value = serenity::json::from_str(body).unwrap();
+        payload["embeds"][0]["fields"]
+            .as_array()
+            .is_some_and(|fields| {
+                fields.iter().any(|field| {
+                    field["name"] == "購入後の残高" && field["value"] == format!("{} NOT", i64::MAX)
+                })
+            })
+    }));
+    let confirm = component("content:confirm:100-930:yes", 999);
+    for _ in 0..2 {
+        purchases::handle_action(&http, &data, &confirm, SystemTime::now())
+            .await
+            .unwrap();
+    }
+    let purchases = data.shop.list_purchases(seller()).await.unwrap();
+    assert_eq!(purchases.len(), 1);
+    let purchase = purchases[0].buyer().id();
+    assert!(mock.role_members.lock().unwrap().contains(&(100, 999)));
+    assert_eq!(
+        data.not.get_balance(seller()).await.unwrap().get(),
+        i64::MAX
+    );
+    refund(&http, &data, seller(), purchase, "self-return")
+        .await
+        .unwrap();
+    assert!(!mock.role_members.lock().unwrap().contains(&(100, 999)));
+    assert_eq!(
+        data.not.get_balance(seller()).await.unwrap().get(),
+        i64::MAX
+    );
+    assert_eq!(
+        data.shop.get_purchase(seller(), purchase).await,
+        Err(UseCaseError::AlreadyRefunded)
+    );
+
+    let quote = data
+        .shop
+        .prepare_purchase(seller(), item.id(), "self-rebuy", SystemTime::now())
+        .await
+        .unwrap();
+    let purchase = data
+        .shop
+        .purchase(seller(), &quote, SystemTime::now())
+        .await
+        .unwrap()
+        .buyer()
+        .id();
+    data.not
+        .adjust_balance(
+            seller(),
+            seller().user_id(),
+            Balance::try_from(0).unwrap(),
+            "seller-spent",
+        )
+        .await
+        .unwrap();
+    mock.role_change_mode.store(1, Ordering::Relaxed);
+    assert!(
+        deliver(&http, &data, seller(), purchase)
+            .await
+            .unwrap()
+            .0
+            .contains("返金しました")
+    );
+    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 0);
+    assert_eq!(
+        data.shop.get_purchase(seller(), purchase).await,
+        Err(UseCaseError::AlreadyRefunded)
     );
     data.database.close().await.unwrap();
 }

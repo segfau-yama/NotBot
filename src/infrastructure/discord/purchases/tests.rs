@@ -267,7 +267,8 @@ async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_sto
             .await
             .unwrap();
     }
-    let (text, buttons) = list(&data, buyer(), 0).await.unwrap();
+    let (text, buttons) = list(&http, &data, buyer(), 0).await.unwrap();
+    assert!(text.starts_with("サーバー: テストサーバー\n購入一覧"));
     assert!(text.contains("1/2"));
     assert_eq!(
         to_value(&buttons).unwrap()[0]["components"]
@@ -277,6 +278,7 @@ async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_sto
         5
     );
     let (text, _) = act(&http, &data, "content:purchases:100:1").await.unwrap();
+    assert!(text.starts_with("サーバー: テストサーバー\n購入一覧"));
     assert!(text.contains("2/2"));
     assert!(!text.contains("content-"));
     assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 694);

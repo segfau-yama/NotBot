@@ -304,23 +304,17 @@ impl ShopUseCase {
         let seller_balance = session
             .get_balance(actor.guild_id(), purchase.seller().user_id())
             .await?;
-        if seller_balance.get() < buyer_amount.get() {
-            return Err(UseCaseError::InsufficientBalance);
+        if purchase.buyer().user_id() != purchase.seller().user_id() {
+            if seller_balance.get() < buyer_amount.get() {
+                return Err(UseCaseError::InsufficientBalance);
+            }
+            seller_balance.apply(seller_amount)?;
+            session
+                .get_balance(actor.guild_id(), purchase.buyer().user_id())
+                .await?
+                .apply(buyer_amount)?;
         }
-        seller_balance.apply(seller_amount)?;
-        session
-            .get_balance(actor.guild_id(), purchase.buyer().user_id())
-            .await?
-            .apply(buyer_amount)?;
-        let buyer = session
-            .append_entry(NewLedgerEntry::try_new(
-                actor.guild_id(),
-                purchase.buyer().user_id(),
-                buyer_amount,
-                LedgerReason::Refund(purchase_id),
-                buyer_key,
-            )?)
-            .await?;
+        // 同一ユーザーの相殺でもSUMが途中で整数上限を超えないよう、負数行を先に記録する。
         let seller = session
             .append_entry(NewLedgerEntry::try_new(
                 actor.guild_id(),
@@ -328,6 +322,15 @@ impl ShopUseCase {
                 seller_amount,
                 LedgerReason::SaleRefund(purchase.seller().id()),
                 seller_key,
+            )?)
+            .await?;
+        let buyer = session
+            .append_entry(NewLedgerEntry::try_new(
+                actor.guild_id(),
+                purchase.buyer().user_id(),
+                buyer_amount,
+                LedgerReason::Refund(purchase_id),
+                buyer_key,
             )?)
             .await?;
         session.commit().await?;
@@ -515,7 +518,7 @@ async fn purchase_result(
         .ok_or(DatabaseError::InvalidData)?;
     if seller.guild_id() != buyer.guild_id()
         || seller.user_id() != item.seller_id()
-        || buyer.user_id() == seller.user_id()
+        || (buyer.user_id() == seller.user_id() && matches!(item.target(), ItemTarget::Content(_)))
         || seller.reason() != LedgerReason::Sale(buyer.id())
         || seller.amount()
             != buyer
@@ -587,7 +590,7 @@ async fn validate_purchase(
     {
         return Err(ValidationError::InvalidFileSize.into());
     }
-    if item.seller_id() == actor.user_id() {
+    if item.seller_id() == actor.user_id() && matches!(item.target(), ItemTarget::Content(_)) {
         return Err(UseCaseError::SelfPurchase);
     }
     if session
@@ -604,10 +607,12 @@ async fn validate_purchase(
         return Err(UseCaseError::InsufficientBalance);
     }
     buyer_balance.apply(amount.negated()?)?;
-    session
-        .get_balance(actor.guild_id(), item.seller_id())
-        .await?
-        .apply(amount)?;
+    if item.seller_id() != actor.user_id() {
+        session
+            .get_balance(actor.guild_id(), item.seller_id())
+            .await?
+            .apply(amount)?;
+    }
     Ok(())
 }
 

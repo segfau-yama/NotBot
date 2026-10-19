@@ -12,6 +12,10 @@ pub(super) async fn actor(ctx: Context<'_>, supplied: Option<&str>) -> Result<Ac
     Ok(authenticate(ctx.http(), guild_id, ctx.author().id).await?)
 }
 
+pub(super) async fn guild_name(http: &Http, guild: DomainGuildId) -> Result<String, Error> {
+    Ok(http.get_guild(GuildId::new(guild.get())).await?.name)
+}
+
 pub(super) async fn adjustment_target(
     http: &Http,
     actor: Actor,

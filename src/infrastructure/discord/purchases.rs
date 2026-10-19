@@ -45,7 +45,11 @@ async fn prepare(
     }
     let balance = data.not.get_balance(actor).await?;
     let price = quote.item().details().price().get();
-    let after = balance.apply(NotAmount::new(-price))?;
+    let after = if quote.item().seller_id() == actor.user_id() {
+        balance
+    } else {
+        balance.apply(NotAmount::new(-price))?
+    };
     let guild = http.get_guild(GuildId::new(actor.guild_id().get())).await?;
     let message = CreateMessage::new()
         .embed(
@@ -247,6 +251,7 @@ async fn confirm(
 }
 
 pub(super) async fn list(
+    http: &Http,
     data: &Data,
     actor: Actor,
     page: usize,
@@ -257,9 +262,9 @@ pub(super) async fn list(
     }
     let last = (purchases.len() - 1) / 5;
     let page = page.min(last);
+    let guild_name = services::guild_name(http, actor.guild_id()).await?;
     let mut text = format!(
-        "サーバー {} の購入一覧（{}/{}）",
-        actor.guild_id(),
+        "サーバー: {guild_name}\n購入一覧（{}/{}）",
         page + 1,
         last + 1
     );
@@ -364,7 +369,7 @@ pub(super) async fn handle_action(
                     .await
                 }
                 "resend" => deliver(http, data, actor, target.parse()?).await,
-                _ => list(data, actor, target.parse()?).await,
+                _ => list(http, data, actor, target.parse()?).await,
             }
         }
         _ => Err("購入操作が不正です。BotとのDMから確認してください。".into()),

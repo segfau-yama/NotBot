@@ -2993,10 +2993,10 @@ async fn refund_rolls_back_both_entries_on_second_insert_or_commit_failure() {
         let raw = inspect(&file.path()).await;
         let sql = if fail_commit {
             "CREATE TABLE commit_guard (code TEXT REFERENCES transaction_reason(code) DEFERRABLE INITIALLY DEFERRED);
-             CREATE TRIGGER reject_refund AFTER INSERT ON not_transaction WHEN NEW.reason = 'SALE_REFUND'
+             CREATE TRIGGER reject_refund AFTER INSERT ON not_transaction WHEN NEW.reason = 'REFUND'
              BEGIN INSERT INTO commit_guard VALUES ('UNKNOWN'); END;"
         } else {
-            "CREATE TRIGGER reject_refund BEFORE INSERT ON not_transaction WHEN NEW.reason = 'SALE_REFUND'
+            "CREATE TRIGGER reject_refund BEFORE INSERT ON not_transaction WHEN NEW.reason = 'REFUND'
              BEGIN SELECT RAISE(ABORT, 'injected refund failure'); END;"
         };
         raw.execute_unprepared(sql).await.unwrap();
