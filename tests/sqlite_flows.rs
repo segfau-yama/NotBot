@@ -98,7 +98,7 @@ async fn number(db: &DatabaseConnection, sql: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn migrations_and_seed_data_survive_reopen_and_concurrent_startup() {
+async fn 同時起動や再起動でも初期値を重複作成せず残高を保持する() {
     let file = TestDatabase::new();
     let path = file.path();
     let db = SqliteDatabaseAccess::open(&path).await.unwrap();
@@ -150,7 +150,7 @@ async fn migrations_and_seed_data_survive_reopen_and_concurrent_startup() {
 }
 
 #[tokio::test]
-async fn migration_failure_leaves_no_partial_tables_or_version_marker() {
+async fn 初期化に失敗するとテーブルや適用済みの版を残さない() {
     let file = TestDatabase::new();
     let path = file.path();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -187,7 +187,7 @@ async fn migration_failure_leaves_no_partial_tables_or_version_marker() {
 }
 
 #[tokio::test]
-async fn append_and_view_queries_use_the_same_transaction_and_separate_accounts() {
+async fn 取引内の残高は未確定の増減を含みサーバーと利用者ごとに分かれる() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let mut write = db.begin_write().await.unwrap();
@@ -225,7 +225,7 @@ async fn append_and_view_queries_use_the_same_transaction_and_separate_accounts(
 }
 
 #[tokio::test]
-async fn read_only_explicit_rollback_drop_and_statement_failure_preserve_committed_data() {
+async fn 読取専用の操作と取消や途中失敗では確定済みの履歴を変えない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let mut seed = db.begin_write().await.unwrap();
@@ -268,7 +268,7 @@ async fn read_only_explicit_rollback_drop_and_statement_failure_preserve_committ
 }
 
 #[tokio::test]
-async fn foreign_keys_are_enabled_on_both_pooled_connections() {
+async fn どの接続からも存在しない参照先を持つ履歴を登録できない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let missing_sale = || {
@@ -307,7 +307,7 @@ async fn foreign_keys_are_enabled_on_both_pooled_connections() {
 }
 
 #[tokio::test]
-async fn invalid_balance_and_integer_overflow_abort_the_whole_session() {
+async fn 負の集計残高や整数上限を超える集計は取引全体を失敗させる() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let mut write = db.begin_write().await.unwrap();
@@ -332,7 +332,7 @@ async fn invalid_balance_and_integer_overflow_abort_the_whole_session() {
 }
 
 #[tokio::test]
-async fn immediate_writers_wait_for_commit_before_reading_and_report_lock_conflicts() {
+async fn 同時の残高変更は先の確定を待ち待機時間を超えたら競合として返す() {
     let file = TestDatabase::new();
     let first = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let second = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -385,7 +385,7 @@ async fn immediate_writers_wait_for_commit_before_reading_and_report_lock_confli
 }
 
 #[tokio::test]
-async fn cancelled_tasks_and_cancelled_begin_do_not_leave_a_transaction_in_the_pool() {
+async fn 処理や取引開始を中断しても次の操作に未完了の取引を持ち越さない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let task_db = db.clone();
@@ -424,7 +424,7 @@ async fn cancelled_tasks_and_cancelled_begin_do_not_leave_a_transaction_in_the_p
 }
 
 #[tokio::test]
-async fn commit_constraint_failure_rolls_back_all_inserts() {
+async fn 確定時に制約違反が起きたら追加した全履歴を取り消す() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let raw = inspect(&file.path()).await;
@@ -451,7 +451,7 @@ async fn commit_constraint_failure_rolls_back_all_inserts() {
 }
 
 #[tokio::test]
-async fn schema_constraints_and_latest_revision_views_are_enforced_by_sqlite() {
+async fn 不正な履歴を制約で拒否し現在状態には最新の版だけを表示する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let raw = inspect(&file.path()).await;
@@ -541,7 +541,7 @@ async fn schema_constraints_and_latest_revision_views_are_enforced_by_sqlite() {
 }
 
 #[tokio::test]
-async fn newer_schema_versions_are_rejected_and_closed_pools_are_unavailable() {
+async fn 未対応の保存形式や終了した接続では操作できない() {
     assert_eq!(
         SqliteDatabaseAccess::open("").await.err(),
         Some(DatabaseError::InvalidData)
@@ -579,7 +579,7 @@ fn target(value: i64) -> Balance {
 }
 
 #[tokio::test]
-async fn voice_rewards_keep_daily_caps_replays_and_atomicity_without_a_schema_change() {
+async fn 通話報酬は一分一回かつ日本時間で一日300回まで付与し再試行では増やさない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let other_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -702,7 +702,7 @@ async fn voice_rewards_keep_daily_caps_replays_and_atomicity_without_a_schema_ch
 }
 
 #[tokio::test]
-async fn rewards_migrate_preserve_decisions_enforce_jst_limits_and_survive_reopen() {
+async fn 報酬は日本時間の回数と間隔を守り再起動後も付与と見送りの結果を保つ() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -891,7 +891,7 @@ async fn rewards_migrate_preserve_decisions_enforce_jst_limits_and_survive_reope
 }
 
 #[tokio::test]
-async fn rewards_rollback_atomically_and_serialize_with_purchase_refund_and_other_rewards() {
+async fn 報酬の取引と処理済み記録は一括確定し売買や返金との競合でも重複しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let other_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -978,7 +978,7 @@ async fn rewards_rollback_atomically_and_serialize_with_purchase_refund_and_othe
 }
 
 #[tokio::test]
-async fn adjustments_and_transfers_replay_and_rollback_without_partial_balances() {
+async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側の履歴を残さない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1164,7 +1164,7 @@ async fn adjustments_and_transfers_replay_and_rollback_without_partial_balances(
 }
 
 #[tokio::test]
-async fn transfers_serialize_duplicates_and_compete_safely_with_purchase_and_refund() {
+async fn 譲渡と購入や返金が競合しても残高不足と重複した送金を防ぐ() {
     let file = TestDatabase::new();
     let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let second_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -1246,7 +1246,7 @@ async fn transfers_serialize_duplicates_and_compete_safely_with_purchase_and_ref
 }
 
 #[tokio::test]
-async fn balance_and_ranking_are_scoped_to_the_actor_guild() {
+async fn 残高とランキングは実行者のサーバーに所属する履歴だけを集計する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1283,7 +1283,7 @@ async fn balance_and_ranking_are_scoped_to_the_actor_guild() {
 }
 
 #[tokio::test]
-async fn adjustment_records_only_the_delta_and_replays_original_results_after_reopen() {
+async fn 目標残高への調整は差額だけ記録し再起動後の再試行でも元の結果を返す() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1355,7 +1355,7 @@ async fn adjustment_records_only_the_delta_and_replays_original_results_after_re
 }
 
 #[tokio::test]
-async fn unauthorized_invalid_and_conflicting_adjustments_do_not_append_history() {
+async fn 権限不足や不正な調整と同じ依頼の内容変更は履歴を増やさない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1411,7 +1411,7 @@ async fn unauthorized_invalid_and_conflicting_adjustments_do_not_append_history(
 }
 
 #[tokio::test]
-async fn concurrent_adjustments_serialize_duplicate_checks_and_delta_calculation() {
+async fn 同時の残高調整でも依頼を重複反映せず差額を順番に計算する() {
     for (second_key, second_target) in [("same", 100), ("same", 50), ("different", 100)] {
         let file = TestDatabase::new();
         let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -1458,7 +1458,7 @@ async fn concurrent_adjustments_serialize_duplicate_checks_and_delta_calculation
 }
 
 #[tokio::test]
-async fn adjustment_handles_money_bounds_and_refuses_out_of_order_ledger_ids() {
+async fn 調整は金額の上下限を守り取引番号の採番上限後は履歴を追加しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1504,7 +1504,7 @@ async fn adjustment_handles_money_bounds_and_refuses_out_of_order_ledger_ids() {
 }
 
 #[tokio::test]
-async fn adjustment_propagates_insert_failure_without_changing_the_balance() {
+async fn 調整の履歴追加に失敗したら残高を変えずに失敗を返す() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1534,7 +1534,7 @@ async fn adjustment_propagates_insert_failure_without_changing_the_balance() {
 }
 
 #[tokio::test]
-async fn ranking_and_event_lookup_reject_invalid_stored_values() {
+async fn ランキングや取引の照会では不正な保存値を有効な値として扱わない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotUseCase::new(db.clone());
@@ -1588,7 +1588,7 @@ fn saved_content(file: &TestDatabase, actor: Actor, request: &str) -> StoredCont
 }
 
 #[test]
-fn content_storage_bounds_reads_and_preserves_completed_files() {
+fn コンテンツは配送できるサイズまで読み取り完成したファイルを保持する() {
     let file = TestDatabase::new();
     let directory = file.0.join("contents");
     for (request, filename) in [
@@ -1665,7 +1665,7 @@ fn content_storage_bounds_reads_and_preserves_completed_files() {
 
 #[cfg(unix)]
 #[test]
-fn storage_rejects_symlinks_and_concurrent_retries_publish_one_file() {
+fn 保存先のリンクを拒否し同じ出品の同時保存では一つのファイルを確定する() {
     let file = TestDatabase::new();
     let directory = file.0.join("contents");
     let results = std::thread::scope(|scope| {
@@ -1699,7 +1699,7 @@ fn storage_rejects_symlinks_and_concurrent_retries_publish_one_file() {
 }
 
 #[tokio::test]
-async fn content_items_keep_fixed_identity_and_history_through_updates_deletion_and_reopen() {
+async fn 商品を変更や削除して再起動しても識別情報と過去の版を保持する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let shop = ShopUseCase::new(db.clone());
@@ -1799,7 +1799,7 @@ async fn content_items_keep_fixed_identity_and_history_through_updates_deletion_
 }
 
 #[tokio::test]
-async fn item_authorization_revisions_and_create_payload_are_checked_before_appending() {
+async fn 商品変更では出品者と版を照合し出品の再試行では初版の内容を確認する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let shop = ShopUseCase::new(db.clone());
@@ -1902,7 +1902,7 @@ async fn item_authorization_revisions_and_create_payload_are_checked_before_appe
 }
 
 #[tokio::test]
-async fn concurrent_content_creation_and_edits_do_not_duplicate_or_overwrite() {
+async fn 同時の出品や商品変更でも商品を重複作成せず他の版を上書きしない() {
     let file = TestDatabase::new();
     let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let second_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -1937,7 +1937,7 @@ async fn concurrent_content_creation_and_edits_do_not_duplicate_or_overwrite() {
 }
 
 #[tokio::test]
-async fn item_creation_rolls_back_all_rows_on_insert_or_commit_failure_and_keeps_saved_file() {
+async fn 商品登録に失敗したら全レコードを取り消して保存済みファイルは保持する() {
     for fail_commit in [false, true] {
         let file = TestDatabase::new();
         let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -1986,7 +1986,7 @@ async fn item_creation_rolls_back_all_rows_on_insert_or_commit_failure_and_keeps
 }
 
 #[tokio::test]
-async fn item_sessions_enforce_read_only_and_reject_unresolved_content_references() {
+async fn 読取専用の取引や未保存のコンテンツ情報からは商品を登録できない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let shop = ShopUseCase::new(db.clone());
@@ -2065,7 +2065,213 @@ async fn trade_count(raw: &DatabaseConnection) -> i64 {
 }
 
 #[tokio::test]
-async fn purchase_quotes_do_not_charge_and_committed_trades_replay_after_changes_and_reopen() {
+async fn ロールの購入と返金は出品者の残高と売上履歴を変えない() {
+    for seller_balance in [0, i64::MAX] {
+        let file = TestDatabase::new();
+        let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+        let not = NotUseCase::new(db.clone());
+        not.adjust_balance(admin(), buyer().user_id(), target(1200), "fund-buyer")
+            .await
+            .unwrap();
+        not.adjust_balance(
+            admin(),
+            admin().user_id(),
+            target(seller_balance),
+            "fund-seller",
+        )
+        .await
+        .unwrap();
+        let shop = ShopUseCase::new(db.clone());
+        let item = shop
+            .create_role(
+                admin(),
+                notbot::domain::RoleId::try_from(500).unwrap(),
+                details("会員権", 500),
+            )
+            .await
+            .unwrap();
+        let now = purchase_time();
+        let quote = shop
+            .prepare_purchase(buyer(), item.id(), "role", now)
+            .await
+            .unwrap();
+        let paid = shop.purchase(buyer(), &quote, now).await.unwrap();
+        assert!(paid.seller().is_none());
+        assert_eq!(not.get_balance(buyer()).await.unwrap(), target(700));
+        assert_eq!(
+            not.get_balance(admin()).await.unwrap(),
+            target(seller_balance)
+        );
+        assert_eq!(shop.purchase(buyer(), &quote, now).await.unwrap(), paid);
+        db.close().await.unwrap();
+
+        let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+        let shop = ShopUseCase::new(db.clone());
+        assert_eq!(
+            shop.find_purchase_by_confirmation(buyer(), "role")
+                .await
+                .unwrap(),
+            Some(paid.clone())
+        );
+        assert_eq!(
+            shop.list_purchases(buyer()).await.unwrap(),
+            vec![paid.clone()]
+        );
+        assert_eq!(
+            shop.get_purchase(buyer(), paid.buyer().id()).await.unwrap(),
+            paid
+        );
+        assert_eq!(
+            shop.purchase(buyer(), &quote, quote.expires_at())
+                .await
+                .unwrap(),
+            paid
+        );
+        let refund = shop
+            .refund(admin(), paid.buyer().id(), "return-role")
+            .await
+            .unwrap();
+        assert!(refund.seller().is_none());
+        assert_eq!(refund.buyer().amount().get(), 500);
+        assert_eq!(
+            shop.refund(admin(), paid.buyer().id(), "return-role")
+                .await
+                .unwrap(),
+            refund
+        );
+        assert_eq!(
+            shop.refund(admin(), paid.buyer().id(), "another-return")
+                .await,
+            Err(UseCaseError::AlreadyRefunded)
+        );
+        assert_eq!(
+            shop.get_purchase(buyer(), paid.buyer().id()).await,
+            Err(UseCaseError::AlreadyRefunded)
+        );
+        assert!(shop.list_purchases(buyer()).await.unwrap().is_empty());
+        assert_eq!(
+            shop.purchase(buyer(), &quote, quote.expires_at())
+                .await
+                .unwrap(),
+            paid
+        );
+        let not = NotUseCase::new(db.clone());
+        assert_eq!(not.get_balance(buyer()).await.unwrap(), target(1200));
+        assert_eq!(
+            not.get_balance(admin()).await.unwrap(),
+            target(seller_balance)
+        );
+        let raw = inspect(&file.path()).await;
+        assert_eq!(trade_count(&raw).await, 1);
+        assert_eq!(
+            number(
+                &raw,
+                "SELECT COUNT(*) FROM not_transaction WHERE reason IN ('SALE', 'SALE_REFUND')"
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            number(
+                &raw,
+                "SELECT COUNT(*) FROM not_transaction WHERE reason = 'REFUND'"
+            )
+            .await,
+            1
+        );
+        raw.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn 旧仕様の売上付きロール購入も再課金せず元の売上とともに返金できる() {
+    let file = TestDatabase::new();
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    NotUseCase::new(db.clone())
+        .adjust_balance(admin(), buyer().user_id(), target(1200), "fund")
+        .await
+        .unwrap();
+    let shop = ShopUseCase::new(db.clone());
+    let item = shop
+        .create_role(
+            admin(),
+            notbot::domain::RoleId::try_from(500).unwrap(),
+            details("旧仕様の会員権", 500),
+        )
+        .await
+        .unwrap();
+    let quote = shop
+        .prepare_purchase(buyer(), item.id(), "legacy-role", purchase_time())
+        .await
+        .unwrap();
+    let mut write = db.begin_write().await.unwrap();
+    let purchase = write
+        .append_entry(
+            NewLedgerEntry::try_new(
+                guild(),
+                buyer().user_id(),
+                NotAmount::new(-500),
+                LedgerReason::Purchase(item.id()),
+                "content:legacy-role:buyer",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let sale = write
+        .append_entry(
+            NewLedgerEntry::try_new(
+                guild(),
+                admin().user_id(),
+                NotAmount::new(500),
+                LedgerReason::Sale(purchase.id()),
+                "content:legacy-role:seller",
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    write.commit().await.unwrap();
+    db.close().await.unwrap();
+
+    let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
+    let shop = ShopUseCase::new(db.clone());
+    let receipt = shop
+        .find_purchase_by_confirmation(buyer(), "legacy-role")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.buyer(), &purchase);
+    assert_eq!(receipt.seller(), Some(&sale));
+    assert_eq!(
+        shop.purchase(buyer(), &quote, quote.expires_at())
+            .await
+            .unwrap(),
+        receipt
+    );
+    let not = NotUseCase::new(db.clone());
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(700));
+    assert_eq!(not.get_balance(admin()).await.unwrap(), target(500));
+    let refund = shop
+        .refund(admin(), purchase.id(), "legacy-return")
+        .await
+        .unwrap();
+    assert_eq!(refund.buyer().amount().get(), 500);
+    assert_eq!(refund.seller().unwrap().amount().get(), -500);
+    assert_eq!(not.get_balance(buyer()).await.unwrap(), target(1200));
+    assert_eq!(not.get_balance(admin()).await.unwrap(), target(0));
+    assert_eq!(
+        shop.refund(admin(), purchase.id(), "legacy-return")
+            .await
+            .unwrap(),
+        refund
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn 購入確認では課金せず確定済みの確認は商品変更や再起動後も再課金しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2091,12 +2297,15 @@ async fn purchase_quotes_do_not_charge_and_committed_trades_replay_after_changes
     assert_eq!(result.buyer().amount().get(), -500);
     assert_eq!(result.buyer().reason(), LedgerReason::Purchase(item.id()));
     assert_eq!(result.buyer().event_key(), "content:confirmed:buyer");
-    assert_eq!(result.seller().amount().get(), 500);
+    assert_eq!(result.seller().unwrap().amount().get(), 500);
     assert_eq!(
-        result.seller().reason(),
+        result.seller().unwrap().reason(),
         LedgerReason::Sale(result.buyer().id())
     );
-    assert_eq!(result.seller().event_key(), "content:confirmed:seller");
+    assert_eq!(
+        result.seller().unwrap().event_key(),
+        "content:confirmed:seller"
+    );
     let not = NotUseCase::new(db.clone());
     assert_eq!(not.get_balance(buyer()).await.unwrap(), target(700));
     assert_eq!(not.get_balance(admin()).await.unwrap(), target(500));
@@ -2154,7 +2363,7 @@ async fn purchase_quotes_do_not_charge_and_committed_trades_replay_after_changes
 }
 
 #[tokio::test]
-async fn purchase_preparation_rejects_invalid_unavailable_and_unauthorized_items() {
+async fn 販売していない商品や購入条件を満たさない商品には購入確認を発行しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 499).await;
@@ -2196,7 +2405,7 @@ async fn purchase_preparation_rejects_invalid_unavailable_and_unauthorized_items
 }
 
 #[tokio::test]
-async fn purchase_expiry_and_actor_binding_are_enforced_before_any_charge() {
+async fn 購入確認の期限と本人とサーバーを照合するまでは課金しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2240,7 +2449,7 @@ async fn purchase_expiry_and_actor_binding_are_enforced_before_any_charge() {
 }
 
 #[tokio::test]
-async fn purchase_requires_the_confirmed_revision_even_if_the_price_is_restored() {
+async fn 価格を元に戻しても確認後に商品版が変わっていれば購入を拒否する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2286,7 +2495,7 @@ async fn purchase_requires_the_confirmed_revision_even_if_the_price_is_restored(
 }
 
 #[tokio::test]
-async fn purchase_rechecks_buyer_funds_and_seller_overflow_after_preparation() {
+async fn 購入確認後に残高が変わったら支払不足と出品者の上限超過を再確認する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2322,7 +2531,7 @@ async fn purchase_rechecks_buyer_funds_and_seller_overflow_after_preparation() {
 }
 
 #[tokio::test]
-async fn concurrent_confirmations_prevent_duplicate_purchases_and_overspending() {
+async fn 複数の購入確認を同時に確定しても二重購入と残高の使い過ぎを防ぐ() {
     for mode in 0..3 {
         let file = TestDatabase::new();
         let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -2387,7 +2596,7 @@ async fn concurrent_confirmations_prevent_duplicate_purchases_and_overspending()
 }
 
 #[tokio::test]
-async fn purchase_rolls_back_both_entries_on_sale_insert_or_commit_failure() {
+async fn 売上の記録や確定に失敗したら購入と売上の両方を取り消す() {
     for fail_commit in [false, true] {
         let file = TestDatabase::new();
         let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -2426,7 +2635,7 @@ async fn purchase_rolls_back_both_entries_on_sale_insert_or_commit_failure() {
 }
 
 #[tokio::test]
-async fn confirmation_keys_are_bound_to_buyer_item_and_amount_even_after_refund() {
+async fn 返金後でも同じ購入確認を別の購入者や商品や金額には使えない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2486,7 +2695,7 @@ async fn confirmation_keys_are_bound_to_buyer_item_and_amount_even_after_refund(
                 guild(),
                 user(),
                 NotAmount::new(-500),
-                LedgerReason::SaleRefund(result.seller().id()),
+                LedgerReason::SaleRefund(result.seller().unwrap().id()),
                 "fixture:sale-refund",
             )
             .unwrap(),
@@ -2526,7 +2735,7 @@ async fn confirmation_keys_are_bound_to_buyer_item_and_amount_even_after_refund(
 }
 
 #[tokio::test]
-async fn incomplete_confirmation_history_is_rejected_without_adding_the_other_side() {
+async fn 購入と売上の片側が欠けた履歴は不足分を追加せず拒否する() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
@@ -2580,7 +2789,7 @@ async fn refund_count(raw: &DatabaseConnection) -> i64 {
 }
 
 #[tokio::test]
-async fn purchase_recovery_and_content_access_survive_changes_deletion_and_reopen_without_writes() {
+async fn 商品変更や削除と再起動の後も未返金の購入を復元し追加課金せず取得できる() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
@@ -2649,7 +2858,7 @@ async fn purchase_recovery_and_content_access_survive_changes_deletion_and_reope
 }
 
 #[tokio::test]
-async fn refunds_use_the_original_amount_revoke_access_and_replay_after_reopen() {
+async fn 返金は元の購入額で行い再送権限を取り消して再試行でも重複返金しない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
@@ -2666,13 +2875,13 @@ async fn refunds_use_the_original_amount_revoke_access_and_replay_after_reopen()
         LedgerReason::Refund(paid.buyer().id())
     );
     assert_eq!(
-        refund.seller().reason(),
-        LedgerReason::SaleRefund(paid.seller().id())
+        refund.seller().unwrap().reason(),
+        LedgerReason::SaleRefund(paid.seller().unwrap().id())
     );
     assert_eq!(refund.buyer().amount().get(), 500);
-    assert_eq!(refund.seller().amount().get(), -500);
+    assert_eq!(refund.seller().unwrap().amount().get(), -500);
     assert_eq!(refund.buyer().event_key(), "refund:return:buyer");
-    assert_eq!(refund.seller().event_key(), "refund:return:seller");
+    assert_eq!(refund.seller().unwrap().event_key(), "refund:return:seller");
     let not = NotUseCase::new(db.clone());
     assert_eq!(not.get_balance(buyer()).await.unwrap(), target(1200));
     assert_eq!(not.get_balance(admin()).await.unwrap(), target(0));
@@ -2730,7 +2939,7 @@ async fn refunds_use_the_original_amount_revoke_access_and_replay_after_reopen()
 }
 
 #[tokio::test]
-async fn refund_authorization_request_identity_and_source_kind_are_enforced() {
+async fn 返金は管理者だけが元の購入と同じ依頼内容で実行できる() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
@@ -2769,7 +2978,7 @@ async fn refund_authorization_request_identity_and_source_kind_are_enforced() {
         .await
         .unwrap();
     assert_eq!(returned.buyer().user_id(), buyer().user_id());
-    assert_eq!(returned.seller().user_id(), user());
+    assert_eq!(returned.seller().unwrap().user_id(), user());
     assert_eq!(
         shop.refund(buyer(), paid.buyer().id(), "return").await,
         Err(UseCaseError::PermissionDenied)
@@ -2808,8 +3017,7 @@ async fn refund_authorization_request_identity_and_source_kind_are_enforced() {
 }
 
 #[tokio::test]
-async fn purchase_lists_and_refunds_are_isolated_by_guild_even_for_the_same_user_and_confirmation()
-{
+async fn 同じ利用者と確認番号でも購入一覧と返金はサーバーごとに分かれる() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
@@ -2874,7 +3082,7 @@ async fn purchase_lists_and_refunds_are_isolated_by_guild_even_for_the_same_user
 }
 
 #[tokio::test]
-async fn refund_rejects_seller_shortfall_and_buyer_overflow_without_revoking_access() {
+async fn 返金できる残高がなければ両者の残高と購入者の取得権限を変えない() {
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
@@ -2909,7 +3117,7 @@ async fn refund_rejects_seller_shortfall_and_buyer_overflow_without_revoking_acc
 }
 
 #[tokio::test]
-async fn concurrent_refunds_do_not_double_refund_and_serialize_against_new_purchases() {
+async fn 同時の返金や新しい購入との競合でも同じ購入を二重返金しない() {
     for mode in 0..3 {
         let file = TestDatabase::new();
         let first_db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -2985,7 +3193,7 @@ async fn concurrent_refunds_do_not_double_refund_and_serialize_against_new_purch
 }
 
 #[tokio::test]
-async fn refund_rolls_back_both_entries_on_second_insert_or_commit_failure() {
+async fn 返金の途中や確定に失敗したら返金と売上取消の両方を取り消す() {
     for fail_commit in [false, true] {
         let file = TestDatabase::new();
         let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
@@ -3024,7 +3232,7 @@ async fn refund_rolls_back_both_entries_on_second_insert_or_commit_failure() {
 }
 
 #[tokio::test]
-async fn recovery_access_and_refund_reject_incomplete_or_mismatched_trade_history() {
+async fn 売買や返金の履歴が不整合なら結果復元と取得と返金を拒否する() {
     for mode in 0..5 {
         let file = TestDatabase::new();
         let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();

@@ -9,7 +9,7 @@ use super::*;
 use crate::{domain::Balance, infrastructure::discord::test_support::*};
 
 #[tokio::test]
-async fn not_operations_check_current_membership_authority_and_expose_fixed_transfer_choices() {
+async fn 残高調整は管理者だけが行え所属するメンバー間では定額を譲渡できる() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -49,7 +49,7 @@ async fn not_operations_check_current_membership_authority_and_expose_fixed_tran
         .adjust_amount(
             admin,
             target,
-            services::parse_amount("-100").unwrap(),
+            crate::domain::NotAmount::new(-100),
             "adjustment-interaction",
         )
         .await

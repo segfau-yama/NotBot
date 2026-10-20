@@ -647,11 +647,11 @@ impl PurchaseQuote {
 pub struct PurchaseResult {
     item: ShopItem,
     buyer: LedgerEntry,
-    seller: LedgerEntry,
+    seller: Option<LedgerEntry>,
 }
 
 impl PurchaseResult {
-    pub(crate) fn new(item: ShopItem, buyer: LedgerEntry, seller: LedgerEntry) -> Self {
+    pub(crate) fn new(item: ShopItem, buyer: LedgerEntry, seller: Option<LedgerEntry>) -> Self {
         Self {
             item,
             buyer,
@@ -665,27 +665,28 @@ impl PurchaseResult {
     pub fn buyer(&self) -> &LedgerEntry {
         &self.buyer
     }
-    pub fn seller(&self) -> &LedgerEntry {
-        &self.seller
+    /// 新しいロール購入には売上がない。既存の売上付き購入は保持する。
+    pub fn seller(&self) -> Option<&LedgerEntry> {
+        self.seller.as_ref()
     }
 }
 
-/// 返金の購入者側と出品者側の履歴。両行は同時に確定する。
+/// 返金履歴。元の購入に売上がある場合だけ売上取消も一括確定する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TradeResult {
     buyer: LedgerEntry,
-    seller: LedgerEntry,
+    seller: Option<LedgerEntry>,
 }
 
 impl TradeResult {
-    pub(crate) fn new(buyer: LedgerEntry, seller: LedgerEntry) -> Self {
+    pub(crate) fn new(buyer: LedgerEntry, seller: Option<LedgerEntry>) -> Self {
         Self { buyer, seller }
     }
 
     pub fn buyer(&self) -> &LedgerEntry {
         &self.buyer
     }
-    pub fn seller(&self) -> &LedgerEntry {
-        &self.seller
+    pub fn seller(&self) -> Option<&LedgerEntry> {
+        self.seller.as_ref()
     }
 }

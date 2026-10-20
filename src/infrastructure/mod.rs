@@ -1,8 +1,6 @@
 pub mod config;
 pub mod discord;
-mod error;
 pub mod sqlite;
-mod stored_content;
+mod types;
 
-pub use error::{Error, UseCaseError};
-pub use stored_content::{MAX_CONTENT_BYTES, StoredContent};
+pub use types::{Error, MAX_CONTENT_BYTES, StoredContent, UseCaseError};

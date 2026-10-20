@@ -1,3 +1,4 @@
+use crate::infrastructure::discord::test_support::actor;
 use std::{sync::atomic::Ordering, time::SystemTime};
 
 use serenity::json::{json, to_value};
@@ -5,7 +6,7 @@ use serenity::json::{json, to_value};
 use super::*;
 use crate::{
     domain::Balance,
-    infrastructure::discord::{purchases, test_support::*},
+    infrastructure::discord::{services, test_support::*},
 };
 
 fn seller() -> Actor {
@@ -39,7 +40,7 @@ async fn scenario() -> (TestDirectory, Data, ShopItem) {
         .create_role(
             seller(),
             crate::domain::RoleId::try_from(500).unwrap(),
-            listings::item_details("会員権".into(), "会員ロール".into(), "500").unwrap(),
+            services::item_details("会員権".into(), "会員ロール".into(), "500").unwrap(),
         )
         .await
         .unwrap();
@@ -49,7 +50,7 @@ async fn offer(http: &Http, data: &Data, item: &ShopItem, id: u64) -> Result<(),
     let mut click = component(&format!("content:buy:100:{}", item.id()), 201);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(id);
-    purchases::handle_action(http, data, &click, SystemTime::now()).await?;
+    services::purchase_action(http, data, &click, SystemTime::now()).await?;
     Ok(())
 }
 async fn confirm(
@@ -57,7 +58,7 @@ async fn confirm(
     data: &Data,
     id: u64,
 ) -> Result<(String, Vec<CreateActionRow>), Error> {
-    purchases::handle_action(
+    services::purchase_action(
         http,
         data,
         &component(&format!("content:confirm:100-{id}:yes"), 201),
@@ -67,7 +68,7 @@ async fn confirm(
 }
 
 #[tokio::test]
-async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_refund() {
+async fn ロール販売は管理権限と階層を確認し売買後の返金では先にロールを解除する() {
     let (_directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -116,7 +117,7 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
     mock.role_members.lock().unwrap().insert((100, 201));
     assert!(offer(&http, &data, &item, 910).await.is_err());
     mock.role_members.lock().unwrap().remove(&(100, 201));
-    listings::publication_status(&http, &data, seller(), item.id())
+    services::publication_status(&http, &data, seller(), item.id())
         .await
         .unwrap();
     assert!(
@@ -129,7 +130,7 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
     assert!(first.is_ok() || second.is_ok());
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
     assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
-    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 500);
+    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 0);
     let purchase = data
         .shop
         .list_purchases(buyer())
@@ -138,14 +139,14 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
         .remove(0)
         .buyer()
         .id();
-    assert!(deliver(&http, &data, actor(), purchase).await.is_err());
+    assert!(deliver_role(&http, &data, actor(), purchase).await.is_err());
     assert!(
-        refund(&http, &data, buyer(), purchase, "unauthorized")
+        refund_role(&http, &data, buyer(), purchase, "unauthorized")
             .await
             .is_err()
     );
     assert!(
-        purchases::list(&http, &data, buyer(), 0)
+        services::list_purchases(&http, &data, buyer(), 0)
             .await
             .unwrap()
             .0
@@ -153,25 +154,36 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
     );
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        refund(&http, &data, seller(), purchase, "manual")
+        refund_role(&http, &data, seller(), purchase, "manual")
             .await
             .is_err()
     );
     assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
     mock.role_change_mode.store(0, Ordering::Relaxed);
-    let original = refund(&http, &data, seller(), purchase, "manual")
+    let original = refund_role(&http, &data, seller(), purchase, "manual")
         .await
         .unwrap();
     assert_eq!(
-        refund(&http, &data, seller(), purchase, "manual")
+        refund_role(&http, &data, seller(), purchase, "manual")
             .await
             .unwrap(),
         original
     );
+    let message =
+        super::super::commands::refund_purchase(&http, &data, seller(), purchase, "manual")
+            .await
+            .unwrap();
+    assert!(message.contains("500 NOTを返金"));
+    assert!(!message.contains("売上取消ID"));
     assert!(!mock.role_members.lock().unwrap().contains(&(100, 201)));
     assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
-    assert!(deliver(&http, &data, buyer(), purchase).await.is_err());
-    let definition = to_value(super::role().create_as_slash_command().unwrap()).unwrap();
+    assert!(deliver_role(&http, &data, buyer(), purchase).await.is_err());
+    let definition = to_value(
+        super::super::commands::role()
+            .create_as_slash_command()
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(definition["name"], "role");
     assert!(
         definition["options"]
@@ -184,7 +196,7 @@ async fn role_sales_validate_permissions_use_shared_checkout_and_revoke_before_r
 }
 
 #[tokio::test]
-async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
+async fn 出品者本人のロール購入も代金を減らし返金は元の購入額を戻す() {
     let (_directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -200,7 +212,7 @@ async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
     let mut click = component(&format!("content:buy:100:{}", item.id()), 999);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(930);
-    purchases::handle_action(&http, &data, &click, SystemTime::now())
+    services::purchase_action(&http, &data, &click, SystemTime::now())
         .await
         .unwrap();
     assert!(mock.posts().iter().any(|body| {
@@ -209,13 +221,14 @@ async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
             .as_array()
             .is_some_and(|fields| {
                 fields.iter().any(|field| {
-                    field["name"] == "購入後の残高" && field["value"] == format!("{} NOT", i64::MAX)
+                    field["name"] == "購入後の残高"
+                        && field["value"] == format!("{} NOT", i64::MAX - 500)
                 })
             })
     }));
     let confirm = component("content:confirm:100-930:yes", 999);
     for _ in 0..2 {
-        purchases::handle_action(&http, &data, &confirm, SystemTime::now())
+        services::purchase_action(&http, &data, &confirm, SystemTime::now())
             .await
             .unwrap();
     }
@@ -225,9 +238,9 @@ async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
     assert!(mock.role_members.lock().unwrap().contains(&(100, 999)));
     assert_eq!(
         data.not.get_balance(seller()).await.unwrap().get(),
-        i64::MAX
+        i64::MAX - 500
     );
-    refund(&http, &data, seller(), purchase, "self-return")
+    refund_role(&http, &data, seller(), purchase, "self-return")
         .await
         .unwrap();
     assert!(!mock.role_members.lock().unwrap().contains(&(100, 999)));
@@ -263,13 +276,13 @@ async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
         .unwrap();
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        deliver(&http, &data, seller(), purchase)
+        deliver_role(&http, &data, seller(), purchase)
             .await
             .unwrap()
             .0
             .contains("返金しました")
     );
-    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 0);
+    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 500);
     assert_eq!(
         data.shop.get_purchase(seller(), purchase).await,
         Err(UseCaseError::AlreadyRefunded)
@@ -278,7 +291,7 @@ async fn seller_can_buy_own_role_and_refund_without_changing_balance() {
 }
 
 #[tokio::test]
-async fn role_failure_refunds_only_confirmed_absence_and_unknown_state_recovers_after_restart() {
+async fn ロールの未付与を確認できたときだけ返金し結果不明は再起動後も照合できる() {
     for mode in [1, 2, 3] {
         let (directory, data, item) = scenario().await;
         let mock = MockDiscord::new();
@@ -311,7 +324,9 @@ async fn role_failure_refunds_only_confirmed_absence_and_unknown_state_recovers_
             let data = setup(&directory).await;
             mock.role_change_mode.store(0, Ordering::Relaxed);
             mock.fail_role_lookup.store(false, Ordering::Relaxed);
-            reconcile(&http, &data, GuildId::new(100)).await.unwrap();
+            reconcile_roles(&http, &data, GuildId::new(100))
+                .await
+                .unwrap();
             assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
             assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
             assert_eq!(
@@ -337,7 +352,7 @@ async fn role_failure_refunds_only_confirmed_absence_and_unknown_state_recovers_
 }
 
 #[tokio::test]
-async fn role_delivery_survives_seller_shortfall_and_failed_manual_refund_restores_entitlement() {
+async fn 返金で購入者の残高上限を超える場合は権利を維持し解除したロールを復元する() {
     let (_directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -356,40 +371,42 @@ async fn role_delivery_survives_seller_shortfall_and_failed_manual_refund_restor
     data.not
         .adjust_balance(
             seller(),
-            seller().user_id(),
-            Balance::try_from(0).unwrap(),
-            "spent-sale",
+            buyer().user_id(),
+            Balance::try_from(i64::MAX).unwrap(),
+            "buyer-at-limit",
         )
         .await
         .unwrap();
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        deliver(&http, &data, buyer(), purchase)
+        deliver_role(&http, &data, buyer(), purchase)
             .await
             .unwrap()
             .0
             .contains("RoleDeliveryPending")
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), i64::MAX);
     assert!(data.shop.get_purchase(buyer(), purchase).await.is_ok());
     mock.role_change_mode.store(0, Ordering::Relaxed);
-    reconcile(&http, &data, GuildId::new(100)).await.unwrap();
+    reconcile_roles(&http, &data, GuildId::new(100))
+        .await
+        .unwrap();
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
     assert!(
-        refund(&http, &data, seller(), purchase, "insufficient-sale")
+        refund_role(&http, &data, seller(), purchase, "buyer-overflow")
             .await
             .is_err()
     );
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), i64::MAX);
     let foreign = Actor::new(
         crate::domain::GuildId::try_from(101).unwrap(),
         buyer().user_id(),
         true,
     );
-    assert!(deliver(&http, &data, foreign, purchase).await.is_err());
+    assert!(deliver_role(&http, &data, foreign, purchase).await.is_err());
     assert!(
-        refund(&http, &data, foreign, purchase, "foreign")
+        refund_role(&http, &data, foreign, purchase, "foreign")
             .await
             .is_err()
     );

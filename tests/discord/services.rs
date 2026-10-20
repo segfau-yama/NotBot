@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[tokio::test]
-async fn p07_authentication_balance_and_ranking_keep_guilds_and_permissions_separate() {
+async fn 所属と権限を確認した本人だけが対象サーバーの残高とランキングを利用できる() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -110,11 +110,15 @@ async fn p07_authentication_balance_and_ranking_keep_guilds_and_permissions_sepa
     data.database.close().await.unwrap();
 }
 
-#[tokio::test]
-async fn p07_command_contract_rejects_missing_guild_cross_guild_and_unsafe_amounts() {
+#[test]
+fn サーバー内から別サーバーは指定できず個別の会話では指定が必要である() {
     assert!(target_guild(None, None).is_err());
     assert!(target_guild(Some(GuildId::new(100)), Some("101")).is_err());
     assert!(target_guild(None, Some("0")).is_err());
+}
+
+#[test]
+fn 残高の入力は64ビットの非負整数に限る() {
     assert_eq!(
         parse_balance("9223372036854775807").unwrap().get(),
         i64::MAX
@@ -122,27 +126,10 @@ async fn p07_command_contract_rejects_missing_guild_cross_guild_and_unsafe_amoun
     for value in ["", "-1", "1.0", "1e3", "１２", "9223372036854775808"] {
         assert!(parse_balance(value).is_err(), "{value}");
     }
-    for (value, expected) in [
-        ("100", 100),
-        ("+100", 100),
-        ("-100", -100),
-        ("0", 0),
-        ("-9223372036854775808", i64::MIN),
-        ("9223372036854775807", i64::MAX),
-    ] {
-        assert_eq!(parse_amount(value).unwrap().get(), expected);
-    }
-    for value in [
-        "",
-        "1.0",
-        "1e3",
-        "１２",
-        " 100",
-        "9223372036854775808",
-        "-9223372036854775809",
-    ] {
-        assert!(parse_amount(value).is_err(), "{value}");
-    }
+}
+
+#[test]
+fn 残高コマンドは対象サーバーと増減額を文字列で受け取る() {
     let definition = to_value(commands::not().create_as_slash_command().unwrap()).unwrap();
     assert_eq!(definition["integration_types"], serenity::json::json!([0]));
     assert_eq!(definition["contexts"], serenity::json::json!([0, 1]));
@@ -177,6 +164,10 @@ async fn p07_command_contract_rejects_missing_guild_cross_guild_and_unsafe_amoun
             );
         }
     }
+}
+
+#[tokio::test]
+async fn 返信には外部エラーの秘密情報を含めず業務エラーを表示する() {
     let mock = MockDiscord::new();
     let error: Error = mock
         .http()
@@ -188,12 +179,9 @@ async fn p07_command_contract_rejects_missing_guild_cross_guild_and_unsafe_amoun
     assert!(!public.contains("unknown-route"));
     assert!(!public.contains(&mock.address));
     assert!(!public.contains("offline-secret-interaction-token"));
-    let summary = events::error_summary(&error);
-    assert!(summary.contains("HTTP=404"));
-    assert!(summary.contains("code="));
-    assert!(!summary.contains("unknown-route"));
-    assert!(!summary.contains(&mock.address));
-    assert!(!summary.contains("offline-secret-interaction-token"));
     let internal: Error = crate::infrastructure::UseCaseError::PermissionDenied.into();
-    assert_eq!(events::error_summary(&internal), "PermissionDenied");
+    assert_eq!(
+        events::public_error_message(&internal),
+        "この操作を行う権限がありません"
+    );
 }

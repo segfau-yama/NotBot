@@ -66,15 +66,14 @@ impl ShopUseCase {
             .await?;
         let amount = NotAmount::new(quote.item().details().price().get());
         match (buyer, seller) {
-            (Some(buyer), Some(seller)) => {
+            (Some(buyer), seller) => {
+                if seller.is_none() && matches!(quote.item().target(), ItemTarget::Content(_)) {
+                    return Err(DatabaseError::InvalidData.into());
+                }
                 if buyer.guild_id() != actor.guild_id()
                     || buyer.user_id() != actor.user_id()
                     || buyer.reason() != LedgerReason::Purchase(quote.item().id())
                     || buyer.amount() != amount.negated()?
-                    || seller.guild_id() != actor.guild_id()
-                    || seller.user_id() != quote.item().seller_id()
-                    || seller.reason() != LedgerReason::Sale(buyer.id())
-                    || seller.amount() != amount
                 {
                     return Err(UseCaseError::RequestConflict);
                 }
@@ -110,15 +109,21 @@ impl ShopUseCase {
                 buyer_key,
             )?)
             .await?;
-        let seller = session
-            .append_entry(NewLedgerEntry::try_new(
-                actor.guild_id(),
-                item.seller_id(),
-                amount,
-                LedgerReason::Sale(buyer.id()),
-                seller_key,
-            )?)
-            .await?;
+        let seller = if matches!(item.target(), ItemTarget::Content(_)) {
+            Some(
+                session
+                    .append_entry(NewLedgerEntry::try_new(
+                        actor.guild_id(),
+                        item.seller_id(),
+                        amount,
+                        LedgerReason::Sale(buyer.id()),
+                        seller_key,
+                    )?)
+                    .await?,
+            )
+        } else {
+            None
+        };
         session.commit().await?;
         Ok(PurchaseResult::new(item, buyer, seller))
     }
@@ -144,7 +149,7 @@ impl ShopUseCase {
             .await?;
         let result = match (buyer, seller) {
             (None, None) => None,
-            (Some(buyer), Some(seller)) => {
+            (Some(buyer), seller) => {
                 if buyer.user_id() != actor.user_id() {
                     return Err(UseCaseError::PermissionDenied);
                 }
@@ -165,8 +170,7 @@ impl ShopUseCase {
         let mut results = Vec::new();
         // ponytail: 購入ごとの照会で始める。件数による遅延を計測したらJOINとページングへ集約する。
         for buyer in entries {
-            let purchase = load_purchase(&mut session, buyer).await?;
-            if refund_state(&mut session, &purchase).await?.is_none() {
+            if let Some(purchase) = unrefunded_purchase(&mut session, buyer).await? {
                 results.push(purchase);
             }
         }
@@ -204,10 +208,9 @@ impl ShopUseCase {
         if buyer.user_id() != actor.user_id() && !actor.can_manage_not() {
             return Err(UseCaseError::PermissionDenied);
         }
-        let purchase = load_purchase(&mut session, buyer).await?;
-        if refund_state(&mut session, &purchase).await?.is_some() {
-            return Err(UseCaseError::AlreadyRefunded);
-        }
+        let purchase = unrefunded_purchase(&mut session, buyer)
+            .await?
+            .ok_or(UseCaseError::AlreadyRefunded)?;
         session.commit().await?;
         Ok(purchase)
     }
@@ -220,8 +223,7 @@ impl ShopUseCase {
         let entries = session.list_role_purchase_entries(guild).await?;
         let mut result = Vec::new();
         for entry in entries {
-            let purchase = load_purchase(&mut session, entry).await?;
-            if refund_state(&mut session, &purchase).await?.is_none() {
+            if let Some(purchase) = unrefunded_purchase(&mut session, entry).await? {
                 result.push(purchase)
             }
         }
@@ -229,7 +231,7 @@ impl ShopUseCase {
         Ok(result)
     }
 
-    /// NOT管理者の明示操作だけを受け付ける。同じ依頼IDの再試行では元の2行を返す。
+    /// NOT管理者の明示操作だけを受け付ける。同じ依頼IDの再試行では元の履歴を返す。
     pub async fn refund(
         &self,
         actor: Actor,
@@ -287,7 +289,7 @@ impl ShopUseCase {
             .find_by_event_key(actor.guild_id(), &seller_key)
             .await?;
         match (buyer, seller) {
-            (Some(buyer), Some(seller)) => {
+            (Some(buyer), seller) if seller.is_some() == purchase.seller().is_some() => {
                 let result = checked_refund(&purchase, buyer, seller)
                     .map_err(|_| UseCaseError::RequestConflict)?;
                 session.commit().await?;
@@ -300,30 +302,41 @@ impl ShopUseCase {
             return Err(UseCaseError::AlreadyRefunded);
         }
         let buyer_amount = purchase.buyer().amount().negated()?;
-        let seller_amount = purchase.seller().amount().negated()?;
-        let seller_balance = session
-            .get_balance(actor.guild_id(), purchase.seller().user_id())
-            .await?;
-        if purchase.buyer().user_id() != purchase.seller().user_id() {
-            if seller_balance.get() < buyer_amount.get() {
-                return Err(UseCaseError::InsufficientBalance);
-            }
-            seller_balance.apply(seller_amount)?;
+        if purchase
+            .seller()
+            .is_none_or(|seller| seller.user_id() != purchase.buyer().user_id())
+        {
             session
                 .get_balance(actor.guild_id(), purchase.buyer().user_id())
                 .await?
                 .apply(buyer_amount)?;
         }
         // 同一ユーザーの相殺でもSUMが途中で整数上限を超えないよう、負数行を先に記録する。
-        let seller = session
-            .append_entry(NewLedgerEntry::try_new(
-                actor.guild_id(),
-                purchase.seller().user_id(),
-                seller_amount,
-                LedgerReason::SaleRefund(purchase.seller().id()),
-                seller_key,
-            )?)
-            .await?;
+        let seller = if let Some(seller) = purchase.seller() {
+            let seller_amount = seller.amount().negated()?;
+            if seller.user_id() != purchase.buyer().user_id() {
+                let balance = session
+                    .get_balance(actor.guild_id(), seller.user_id())
+                    .await?;
+                if balance.get() < buyer_amount.get() {
+                    return Err(UseCaseError::InsufficientBalance);
+                }
+                balance.apply(seller_amount)?;
+            }
+            Some(
+                session
+                    .append_entry(NewLedgerEntry::try_new(
+                        actor.guild_id(),
+                        seller.user_id(),
+                        seller_amount,
+                        LedgerReason::SaleRefund(seller.id()),
+                        seller_key,
+                    )?)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let buyer = session
             .append_entry(NewLedgerEntry::try_new(
                 actor.guild_id(),
@@ -490,6 +503,15 @@ impl ShopUseCase {
     }
 }
 
+async fn unrefunded_purchase(
+    session: &mut SqliteSession,
+    buyer: LedgerEntry,
+) -> Result<Option<PurchaseResult>, UseCaseError> {
+    let purchase = load_purchase(session, buyer).await?;
+    let refunded = refund_state(session, &purchase).await?.is_some();
+    Ok((!refunded).then_some(purchase))
+}
+
 async fn load_purchase(
     session: &mut SqliteSession,
     buyer: LedgerEntry,
@@ -497,17 +519,14 @@ async fn load_purchase(
     if !matches!(buyer.reason(), LedgerReason::Purchase(_)) {
         return Err(UseCaseError::PurchaseNotFound);
     }
-    let seller = session
-        .find_sale(buyer.guild_id(), buyer.id())
-        .await?
-        .ok_or(DatabaseError::InvalidData)?;
+    let seller = session.find_sale(buyer.guild_id(), buyer.id()).await?;
     purchase_result(session, buyer, seller).await
 }
 
 async fn purchase_result(
     session: &mut SqliteSession,
     buyer: LedgerEntry,
-    seller: LedgerEntry,
+    seller: Option<LedgerEntry>,
 ) -> Result<PurchaseResult, UseCaseError> {
     let LedgerReason::Purchase(item_id) = buyer.reason() else {
         return Err(DatabaseError::InvalidData.into());
@@ -516,15 +535,20 @@ async fn purchase_result(
         .find_item(buyer.guild_id(), item_id)
         .await?
         .ok_or(DatabaseError::InvalidData)?;
-    if seller.guild_id() != buyer.guild_id()
-        || seller.user_id() != item.seller_id()
-        || (buyer.user_id() == seller.user_id() && matches!(item.target(), ItemTarget::Content(_)))
-        || seller.reason() != LedgerReason::Sale(buyer.id())
-        || seller.amount()
-            != buyer
-                .amount()
-                .negated()
-                .map_err(|_| DatabaseError::InvalidData)?
+    let amount = buyer
+        .amount()
+        .negated()
+        .map_err(|_| DatabaseError::InvalidData)?;
+    if matches!(item.target(), ItemTarget::Content(_))
+        && (seller.is_none() || buyer.user_id() == item.seller_id())
+    {
+        return Err(DatabaseError::InvalidData.into());
+    }
+    if let Some(seller) = &seller
+        && (seller.guild_id() != buyer.guild_id()
+            || seller.user_id() != item.seller_id()
+            || seller.reason() != LedgerReason::Sale(buyer.id())
+            || seller.amount() != amount)
     {
         return Err(DatabaseError::InvalidData.into());
     }
@@ -538,12 +562,14 @@ async fn refund_state(
     let buyer = session
         .find_refund(purchase.buyer().guild_id(), purchase.buyer().id())
         .await?;
-    let seller = session
-        .find_refund(purchase.seller().guild_id(), purchase.seller().id())
-        .await?;
+    let seller = if let Some(seller) = purchase.seller() {
+        session.find_refund(seller.guild_id(), seller.id()).await?
+    } else {
+        None
+    };
     match (buyer, seller) {
         (None, None) => Ok(None),
-        (Some(buyer), Some(seller)) => Ok(Some(checked_refund(purchase, buyer, seller)?)),
+        (Some(buyer), seller) => Ok(Some(checked_refund(purchase, buyer, seller)?)),
         _ => Err(DatabaseError::InvalidData.into()),
     }
 }
@@ -551,28 +577,32 @@ async fn refund_state(
 fn checked_refund(
     purchase: &PurchaseResult,
     buyer: LedgerEntry,
-    seller: LedgerEntry,
+    seller: Option<LedgerEntry>,
 ) -> Result<TradeResult, DatabaseError> {
     if buyer.guild_id() != purchase.buyer().guild_id()
-        || seller.guild_id() != purchase.seller().guild_id()
         || buyer.user_id() != purchase.buyer().user_id()
-        || seller.user_id() != purchase.seller().user_id()
         || buyer.reason() != LedgerReason::Refund(purchase.buyer().id())
-        || seller.reason() != LedgerReason::SaleRefund(purchase.seller().id())
         || buyer.amount()
             != purchase
                 .buyer()
                 .amount()
                 .negated()
                 .map_err(|_| DatabaseError::InvalidData)?
-        || seller.amount()
-            != purchase
-                .seller()
-                .amount()
-                .negated()
-                .map_err(|_| DatabaseError::InvalidData)?
     {
         return Err(DatabaseError::InvalidData);
+    }
+    match (purchase.seller(), seller.as_ref()) {
+        (Some(original), Some(refund))
+            if refund.guild_id() == original.guild_id()
+                && refund.user_id() == original.user_id()
+                && refund.reason() == LedgerReason::SaleRefund(original.id())
+                && refund.amount()
+                    == original
+                        .amount()
+                        .negated()
+                        .map_err(|_| DatabaseError::InvalidData)? => {}
+        (None, None) => {}
+        _ => return Err(DatabaseError::InvalidData),
     }
     Ok(TradeResult::new(buyer, seller))
 }
@@ -607,7 +637,7 @@ async fn validate_purchase(
         return Err(UseCaseError::InsufficientBalance);
     }
     buyer_balance.apply(amount.negated()?)?;
-    if item.seller_id() != actor.user_id() {
+    if matches!(item.target(), ItemTarget::Content(_)) {
         session
             .get_balance(actor.guild_id(), item.seller_id())
             .await?

@@ -8,7 +8,7 @@ use crate::infrastructure::discord::test_support::{
 };
 
 #[tokio::test]
-async fn gateway_rewards_filter_non_members_bots_webhooks_self_actions_and_replay_after_restart() {
+async fn 投稿と反応の報酬は対象者を確認し再配信や再起動後も一度だけ付与する() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -19,8 +19,8 @@ async fn gateway_rewards_filter_non_members_bots_webhooks_self_actions_and_repla
     value["author"]["id"] = json!("201");
     value["author"]["bot"] = json!(false);
     let post: Message = from_value(value.clone()).unwrap();
-    message(&http, &data, &post, now).await.unwrap();
-    message(&http, &data, &post, now + Duration::from_secs(60))
+    reward_message(&http, &data, &post, now).await.unwrap();
+    reward_message(&http, &data, &post, now + Duration::from_secs(60))
         .await
         .unwrap();
     let buyer = Actor::new(
@@ -34,7 +34,7 @@ async fn gateway_rewards_filter_non_members_bots_webhooks_self_actions_and_repla
     value["message_reference"] =
         json!({"message_id":"900","channel_id":"400","guild_id":"100","type":0});
     let reply: Message = from_value(value.clone()).unwrap();
-    message(&http, &data, &reply, now + Duration::from_secs(60))
+    reward_message(&http, &data, &reply, now + Duration::from_secs(60))
         .await
         .unwrap();
     assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 10);
@@ -52,7 +52,7 @@ async fn gateway_rewards_filter_non_members_bots_webhooks_self_actions_and_repla
         let mut ignored = value.clone();
         ignored["id"] = json!(id);
         ignored[field] = input;
-        message(
+        reward_message(
             &http,
             &data,
             &from_value(ignored).unwrap(),
@@ -66,32 +66,32 @@ async fn gateway_rewards_filter_non_members_bots_webhooks_self_actions_and_repla
         "emoji":{"name":"👍"},"burst":false,"type":0}),
     )
     .unwrap();
-    reaction(&http, &data, &click, now).await.unwrap();
+    reward_reaction(&http, &data, &click, now).await.unwrap();
     assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 11);
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 30);
     data.database.close().await.unwrap();
     let data = setup(&directory).await;
     click.emoji = ReactionType::Unicode("🎉".into());
-    reaction(&http, &data, &click, now + Duration::from_secs(600))
+    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(200));
-    reaction(&http, &data, &click, now + Duration::from_secs(600))
+    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(42));
-    reaction(&http, &data, &click, now + Duration::from_secs(600))
+    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(202));
     mock.reward_message.lock().unwrap()["webhook_id"] = json!("42");
-    reaction(&http, &data, &click, now + Duration::from_secs(600))
+    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     mock.reward_message.lock().unwrap()["webhook_id"] = json!(null);
     mock.deny_member
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    reaction(&http, &data, &click, now + Duration::from_secs(600))
+    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 11);

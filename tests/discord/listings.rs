@@ -1,3 +1,4 @@
+use crate::infrastructure::discord::test_support::actor;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -32,7 +33,7 @@ fn draft(id: &str) -> ListingDraft {
 }
 
 #[test]
-fn content_command_has_dm_context_and_validated_attachment_and_integer_string_options() {
+fn 出品コマンドは本人との会話で商品情報と価格とサーバーと添付を必須にする() {
     let commands =
         poise::builtins::create_application_commands(&[super::super::commands::content()]);
     let command = to_value(&commands[0]).unwrap();
@@ -61,7 +62,7 @@ fn content_command_has_dm_context_and_validated_attachment_and_integer_string_op
 }
 
 #[test]
-fn drafts_validate_input_ownership_expiry_and_single_acceptance() {
+fn 出品価格には正の整数だけを指定できる() {
     for price in ["0", "-1", "1.5", "9223372036854775808", " 500"] {
         assert!(
             ListingDraft::new(
@@ -72,9 +73,14 @@ fn drafts_validate_input_ownership_expiry_and_single_acceptance() {
                 price,
                 attachment()
             )
-            .is_err()
+            .is_err(),
+            "{price}"
         );
     }
+}
+
+#[test]
+fn 出品名は絵文字も文字数制限の対象になる() {
     assert!(
         ListingDraft::new(
             "1".into(),
@@ -86,20 +92,78 @@ fn drafts_validate_input_ownership_expiry_and_single_acceptance() {
         )
         .is_err()
     );
-    let mut drafts = HashMap::from([(200, draft("same-id"))]);
-    assert!(take_draft(&mut drafts, 201, "same-id").is_err());
-    assert!(take_draft(&mut drafts, 200, "different-id").is_err());
-    let accepted = take_draft(&mut drafts, 200, "same-id").unwrap();
-    assert_eq!(accepted.id, "same-id");
-    assert!(take_draft(&mut drafts, 200, "same-id").is_err());
+}
+
+#[tokio::test]
+async fn 下書きは作成した本人だけが同じ確認から操作できる() {
+    let directory = TestDirectory::new();
+    let data = setup(&directory).await;
+    let mock = MockDiscord::new();
+    let http = mock.http();
+    remember_draft(&data, draft("same-id"), "販売先").await;
+
+    for (user, id) in [(201, "same-id"), (200, "different-id")] {
+        assert!(
+            listing_action(
+                &http,
+                &data,
+                &component(&format!("content:draft:{id}:cancel"), user)
+            )
+            .await
+            .is_err()
+        );
+    }
+    let (text, _) = listing_action(
+        &http,
+        &data,
+        &component("content:draft:same-id:cancel", 200),
+    )
+    .await
+    .unwrap();
+    assert_eq!(text, "出品をキャンセルしました。");
+    data.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn 同じ下書きの取消は一度だけ受け付ける() {
+    let directory = TestDirectory::new();
+    let data = setup(&directory).await;
+    let mock = MockDiscord::new();
+    let http = mock.http();
+    remember_draft(&data, draft("same-id"), "販売先").await;
+    let cancel = component("content:draft:same-id:cancel", 200);
+
+    let (text, _) = listing_action(&http, &data, &cancel).await.unwrap();
+    assert_eq!(text, "出品をキャンセルしました。");
+    assert!(listing_action(&http, &data, &cancel).await.is_err());
+    data.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn 期限切れの下書きは確定できない() {
+    let directory = TestDirectory::new();
+    let data = setup(&directory).await;
+    let mock = MockDiscord::new();
+    let http = mock.http();
     let mut expired = draft("expired");
     expired.expires_at = Instant::now();
-    drafts.insert(200, expired);
-    assert!(take_draft(&mut drafts, 200, "expired").is_err());
+    remember_draft(&data, expired, "販売先").await;
+
+    assert!(
+        listing_action(
+            &http,
+            &data,
+            &component("content:draft:expired:publish", 200)
+        )
+        .await
+        .is_err()
+    );
+    assert!(mock.requests.lock().unwrap().is_empty());
+    data.database.close().await.unwrap();
 }
 
 #[test]
-fn attachment_metadata_rejects_external_urls_paths_and_undeliverable_sizes() {
+fn 添付には外部サイトや危険なファイル名や配送できないサイズを許可しない() {
     for url in [
         "http://cdn.discordapp.com/attachments/1/2/a",
         "https://example.com/file",
@@ -123,7 +187,7 @@ fn attachment_metadata_rejects_external_urls_paths_and_undeliverable_sizes() {
 }
 
 #[tokio::test]
-async fn publication_failure_retries_existing_item_and_never_exposes_content() {
+async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開ファイル情報を含めない() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -147,18 +211,24 @@ async fn publication_failure_retries_existing_item_and_never_exposes_content() {
     read.commit().await.unwrap();
     mock.fail_post.store(false, Ordering::Relaxed);
     assert_eq!(
-        publish(&http, &data, actor(), item.id())
+        publication_status(&http, &data, actor(), item.id())
             .await
             .unwrap()
-            .get(),
-        900
+            .0,
+        format!(
+            "公開表示へ反映しました。商品ID: {}\nhttps://discord.com/channels/100/400/900",
+            item.id()
+        )
     );
     assert_eq!(
-        publish(&http, &data, actor(), item.id())
+        publication_status(&http, &data, actor(), item.id())
             .await
             .unwrap()
-            .get(),
-        900
+            .0,
+        format!(
+            "公開表示へ反映しました。商品ID: {}\nhttps://discord.com/channels/100/400/900",
+            item.id()
+        )
     );
     assert_eq!(mock.posts().len(), 2);
     assert_eq!(data.shop.list(actor()).await.unwrap().len(), 1);
@@ -198,7 +268,7 @@ async fn publication_failure_retries_existing_item_and_never_exposes_content() {
 }
 
 #[tokio::test]
-async fn publication_requires_owner_correct_channel_and_bot_permissions() {
+async fn 商品を公開できるのは出品者本人で正しい販売先とボットの投稿権限が必要である() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -210,32 +280,34 @@ async fn publication_requires_owner_correct_channel_and_bot_permissions() {
         false,
     );
     assert!(
-        publish(&http, &data, stranger, item.id())
+        publication_status(&http, &data, stranger, item.id())
             .await
             .unwrap_err()
             .is::<UseCaseError>()
     );
     mock.wrong_channel.store(true, Ordering::Relaxed);
     assert!(
-        publish(&http, &data, actor(), item.id())
+        publication_status(&http, &data, actor(), item.id())
             .await
-            .unwrap_err()
-            .is::<PublicationPending>()
+            .unwrap()
+            .0
+            .contains("PublicationPending")
     );
     mock.wrong_channel.store(false, Ordering::Relaxed);
     mock.deny_embed.store(true, Ordering::Relaxed);
     assert!(
-        publish(&http, &data, actor(), item.id())
+        publication_status(&http, &data, actor(), item.id())
             .await
-            .unwrap_err()
-            .is::<PublicationPending>()
+            .unwrap()
+            .0
+            .contains("PublicationPending")
     );
     assert!(mock.posts().is_empty());
     data.database.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn publication_database_failures_keep_retry_and_existing_item() {
+async fn 公開記録の保存に失敗しても商品を増やさず同じ商品を再投稿できる() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -254,15 +326,18 @@ async fn publication_database_failures_keep_retry_and_existing_item() {
     let raw = raw(&directory).await;
     raw.execute_unprepared("CREATE TRIGGER reject_publication BEFORE INSERT ON shop_item_publication BEGIN SELECT RAISE(ABORT,'injected'); END;").await.unwrap();
     assert!(
-        publish(&http, &data, actor(), item.id())
+        publication_status(&http, &data, actor(), item.id())
             .await
-            .unwrap_err()
-            .is::<PublicationPending>()
+            .unwrap()
+            .0
+            .contains("PublicationPending")
     );
     raw.execute_unprepared("DROP TRIGGER reject_publication")
         .await
         .unwrap();
-    publish(&http, &data, actor(), item.id()).await.unwrap();
+    publication_status(&http, &data, actor(), item.id())
+        .await
+        .unwrap();
     assert_eq!(mock.posts().len(), 2);
     assert_eq!(data.shop.list(actor()).await.unwrap().len(), 1);
     assert!(
@@ -275,7 +350,7 @@ async fn publication_database_failures_keep_retry_and_existing_item() {
 }
 
 #[tokio::test]
-async fn attachment_reads_enforce_actual_size_and_reject_redirects() {
+async fn 添付は実サイズを確認し上限超過と別の取得先への転送を拒否する() {
     for (status, body, expected) in [
         (200, vec![b'x'; 3], 3),
         (200, vec![b'x'; 3], 2),
@@ -317,14 +392,14 @@ async fn attachment_reads_enforce_actual_size_and_reject_redirects() {
 }
 
 #[tokio::test]
-async fn draft_cancel_and_foreign_click_never_save_or_create_items() {
+async fn 下書きの取消や別人の操作ではファイルも商品も保存しない() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
     data.drafts.lock().await.insert(200, draft("preview"));
     assert!(
-        handle_action(
+        listing_action(
             &http,
             &data,
             &component("content:draft:preview:publish", 201)
@@ -333,7 +408,7 @@ async fn draft_cancel_and_foreign_click_never_save_or_create_items() {
         .is_err()
     );
     assert!(data.drafts.lock().await.contains_key(&200));
-    let (text, _) = handle_action(
+    let (text, _) = listing_action(
         &http,
         &data,
         &component("content:draft:preview:cancel", 200),
@@ -342,7 +417,7 @@ async fn draft_cancel_and_foreign_click_never_save_or_create_items() {
     .unwrap();
     assert!(text.contains("キャンセル"));
     assert!(
-        handle_action(
+        listing_action(
             &http,
             &data,
             &component("content:draft:preview:publish", 200)
@@ -357,7 +432,7 @@ async fn draft_cancel_and_foreign_click_never_save_or_create_items() {
 }
 
 #[tokio::test]
-async fn republish_after_restart_authenticates_and_concurrent_retries_share_one_post() {
+async fn 再起動後も出品者を認証し同じ商品の同時再投稿では公開先を共有する() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let item = saved_item(&data).await;
@@ -367,8 +442,8 @@ async fn republish_after_restart_authenticates_and_concurrent_retries_share_one_
     let http = mock.http();
     let click = component(&format!("content:republish:100:{}", item.id()), 200);
     let (first, second) = tokio::join!(
-        handle_action(&http, &data, &click),
-        handle_action(&http, &data, &click)
+        listing_action(&http, &data, &click),
+        listing_action(&http, &data, &click)
     );
     assert!(first.unwrap().0.contains("公開表示へ反映しました"));
     assert!(second.unwrap().0.contains("公開表示へ反映しました"));

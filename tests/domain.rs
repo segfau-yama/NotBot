@@ -5,27 +5,48 @@ use notbot::domain::{
 };
 
 #[test]
-fn money_rejects_invalid_values_and_overdrafts() {
+fn 価格は正の整数だけを受け付ける() {
     for value in [i64::MIN, -1, 0] {
         assert_eq!(Price::try_from(value), Err(MoneyError::InvalidPrice));
     }
     assert_eq!(Price::try_from(i64::MAX).unwrap().get(), i64::MAX);
+}
+
+#[test]
+fn 残高はゼロ以上の整数だけを受け付ける() {
     assert_eq!(Balance::try_from(-1), Err(MoneyError::NegativeBalance));
+    assert_eq!(Balance::try_from(0).unwrap().get(), 0);
+}
+
+#[test]
+fn 残高を超える減算は拒否する() {
     let balance = Balance::try_from(100).unwrap();
-    assert_eq!(balance.apply(NotAmount::new(-100)).unwrap().get(), 0);
+
     assert_eq!(
         balance.apply(NotAmount::new(-101)),
         Err(MoneyError::NegativeBalance)
     );
+}
+
+#[test]
+fn 残高に増減額を反映できる() {
+    let balance = Balance::try_from(100).unwrap();
+
+    assert_eq!(balance.apply(NotAmount::new(-100)).unwrap().get(), 0);
     assert_eq!(balance.apply(NotAmount::new(50)).unwrap().get(), 150);
+}
+
+#[test]
+fn 増減額にはゼロと負数も使える() {
     assert_eq!(NotAmount::new(0).get(), 0);
     assert_eq!(NotAmount::new(i64::MIN).get(), i64::MIN);
 }
 
 #[test]
-fn money_checks_addition_subtraction_and_negation_boundaries() {
+fn 増減額の加減算が整数範囲を超えたら拒否する() {
     let max = NotAmount::new(i64::MAX);
     let min = NotAmount::new(i64::MIN);
+
     assert_eq!(
         max.checked_add(NotAmount::new(1)),
         Err(MoneyError::Overflow)
@@ -42,8 +63,19 @@ fn money_checks_addition_subtraction_and_negation_boundaries() {
         min.checked_sub(NotAmount::new(1)),
         Err(MoneyError::Overflow)
     );
-    assert_eq!(min.negated(), Err(MoneyError::Overflow));
-    assert_eq!(max.negated().unwrap().get(), -i64::MAX);
+}
+
+#[test]
+fn 符号反転が整数範囲を超えたら拒否する() {
+    assert_eq!(
+        NotAmount::new(i64::MIN).negated(),
+        Err(MoneyError::Overflow)
+    );
+    assert_eq!(NotAmount::new(i64::MAX).negated().unwrap().get(), -i64::MAX);
+}
+
+#[test]
+fn 増減額の加減算を計算できる() {
     assert_eq!(
         NotAmount::new(300).checked_add(NotAmount::new(200)),
         Ok(NotAmount::new(500))
@@ -52,16 +84,17 @@ fn money_checks_addition_subtraction_and_negation_boundaries() {
         NotAmount::new(500).checked_sub(NotAmount::new(200)),
         Ok(NotAmount::new(300))
     );
-    assert_eq!(
-        Balance::try_from(i64::MAX)
-            .unwrap()
-            .apply(NotAmount::new(1)),
-        Err(MoneyError::Overflow)
-    );
 }
 
 #[test]
-fn ids_validate_numeric_ranges_and_canonicalize_decimal_strings() {
+fn 残高の加算が整数上限を超えたら拒否する() {
+    let balance = Balance::try_from(i64::MAX).unwrap();
+
+    assert_eq!(balance.apply(NotAmount::new(1)), Err(MoneyError::Overflow));
+}
+
+#[test]
+fn 識別子は正の十進整数に限り先頭のゼロを正規化する() {
     for invalid in [
         "",
         "0",
@@ -85,7 +118,7 @@ fn ids_validate_numeric_ranges_and_canonicalize_decimal_strings() {
 }
 
 #[test]
-fn item_text_uses_character_limits_and_preserves_description_formatting() {
+fn 商品名と説明は文字数上限を守り説明の改行とタブを保つ() {
     let price = Price::try_from(500).unwrap();
     let details = ItemDetails::try_new(
         "あ".repeat(ITEM_NAME_MAX_CHARS),
@@ -119,7 +152,7 @@ fn item_text_uses_character_limits_and_preserves_description_formatting() {
 }
 
 #[test]
-fn content_metadata_rejects_unsafe_keys_and_unrepresentable_sizes() {
+fn コンテンツ情報には安全な保存キーとファイル名と正のサイズだけを許可する() {
     let file = ContentFile::try_new("content_123-abc", "資料集.pdf", 1024).unwrap();
     assert_eq!(file.key(), "content_123-abc");
     assert_eq!(file.filename(), "資料集.pdf");
@@ -158,7 +191,7 @@ fn content_metadata_rejects_unsafe_keys_and_unrepresentable_sizes() {
 }
 
 #[test]
-fn actor_and_product_models_keep_identity_and_revision_separate_from_details() {
+fn 商品は識別情報と表示内容と版と販売状態を分けて保持する() {
     let actor = Actor::new(
         GuildId::try_from(100).unwrap(),
         UserId::try_from(200).unwrap(),
@@ -215,7 +248,7 @@ fn actor_and_product_models_keep_identity_and_revision_separate_from_details() {
 }
 
 #[test]
-fn ledger_reason_codes_and_sign_rules_match_the_fixed_master_contract() {
+fn 取引理由ごとに許可された符号の増減額だけを記録できる() {
     let source = LedgerEntryId::try_from(2).unwrap();
     let cases = [
         (LedgerReason::Message, "MESSAGE", [false, false, true]),
@@ -268,7 +301,7 @@ fn ledger_reason_codes_and_sign_rules_match_the_fixed_master_contract() {
 }
 
 #[test]
-fn ledger_entries_require_a_key_and_cannot_reference_themselves() {
+fn 取引には依頼を識別するキーが必要で自分自身を取消元に指定できない() {
     let id = LedgerEntryId::try_from(1).unwrap();
     let guild = GuildId::try_from(100).unwrap();
     let user = UserId::try_from(200).unwrap();

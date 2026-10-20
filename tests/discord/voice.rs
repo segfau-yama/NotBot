@@ -16,7 +16,7 @@ fn state(user: u64) -> VoiceState {
 }
 
 #[tokio::test]
-async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_up() {
+async fn 通話報酬は参加中の一分ごとに付与し移動では継続して退出や停止中は付与しない() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -25,8 +25,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     let joined = Instant::now();
     let wall = UNIX_EPOCH + Duration::from_secs(100_000);
     let mut member = state(200);
-    update(&data, guild, &member, joined).await;
-    tick(
+    update_voice(&data, guild, &member, joined).await;
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_millis(59_999),
@@ -35,14 +35,14 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 0);
     assert!(mock.requests.lock().unwrap().is_empty());
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(60),
         wall + Duration::from_secs(60),
     )
     .await;
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(60),
@@ -52,8 +52,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 1);
     member.channel_id = Some(ChannelId::new(501));
     member.self_mute = true;
-    update(&data, guild, &member, joined + Duration::from_secs(61)).await;
-    tick(
+    update_voice(&data, guild, &member, joined + Duration::from_secs(61)).await;
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_millis(119_999),
@@ -61,7 +61,7 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     )
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 1);
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(120),
@@ -69,8 +69,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     )
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 2);
-    update(&data, guild, &state(42), joined + Duration::from_secs(120)).await;
-    tick(
+    update_voice(&data, guild, &state(42), joined + Duration::from_secs(120)).await;
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(180),
@@ -86,8 +86,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     );
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
     member.channel_id = None;
-    update(&data, guild, &member, joined + Duration::from_secs(181)).await;
-    tick(
+    update_voice(&data, guild, &member, joined + Duration::from_secs(181)).await;
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(240),
@@ -96,8 +96,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
     member.channel_id = Some(ChannelId::new(500));
-    update(&data, guild, &member, joined + Duration::from_secs(241)).await;
-    tick(
+    update_voice(&data, guild, &member, joined + Duration::from_secs(241)).await;
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(300),
@@ -105,7 +105,7 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     )
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(301),
@@ -115,7 +115,7 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 4);
     let connection = raw(&directory).await;
     connection.execute_unprepared("CREATE TRIGGER reject_voice BEFORE INSERT ON not_transaction WHEN NEW.event_key LIKE 'voice:%' BEGIN SELECT RAISE(ABORT, 'injected'); END;").await.unwrap();
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(361),
@@ -141,7 +141,7 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
         .await
         .unwrap()
         .unwrap();
-    tick(
+    tick_voice(
         &http,
         &data,
         joined + Duration::from_secs(421),
@@ -163,8 +163,8 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     let data = setup(&directory).await;
     let restart = joined + Duration::from_secs(3600);
     let states = HashMap::from([(member.user_id, member)]);
-    seed(&data, guild, &states, restart).await;
-    tick(
+    seed_voice(&data, guild, &states, restart).await;
+    tick_voice(
         &http,
         &data,
         restart + Duration::from_secs(59),
@@ -172,7 +172,7 @@ async fn voice_minutes_follow_join_move_leave_bots_and_restart_without_catching_
     )
     .await;
     assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 5);
-    tick(
+    tick_voice(
         &http,
         &data,
         restart + Duration::from_secs(60),

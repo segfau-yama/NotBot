@@ -10,18 +10,18 @@ use crate::{
     domain::{Balance, Price},
     infrastructure::{
         UseCaseError,
-        discord::{purchases, test_support::*},
+        discord::{services, test_support::*},
     },
 };
 
 #[tokio::test]
-async fn management_edits_latest_message_and_keeps_database_authoritative_on_failure() {
+async fn 商品管理は最新の公開投稿を編集し公開に失敗しても保存済みの変更を保つ() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
     let item = saved_item(&data).await;
-    listings::publication_status(&http, &data, actor(), item.id())
+    services::publication_status(&http, &data, actor(), item.id())
         .await
         .unwrap();
     // 過去の投稿ではなく、最新の公開記録を編集する。
@@ -55,7 +55,7 @@ async fn management_edits_latest_message_and_keeps_database_authoritative_on_fai
         .prepare_purchase(buyer, item.id(), "old-price", SystemTime::now())
         .await
         .unwrap();
-    let details = listings::item_details("新しい資料".into(), "変更後".into(), "600").unwrap();
+    let details = services::item_details("新しい資料".into(), "変更後".into(), "600").unwrap();
     assert!(
         update_item(&http, &data, buyer, item.id(), 1, details.clone())
             .await
@@ -112,12 +112,12 @@ async fn management_edits_latest_message_and_keeps_database_authoritative_on_fai
             .is_err()
     );
     assert!(
-        listings::publication_status(&http, &data, buyer, item.id())
+        services::publication_status(&http, &data, buyer, item.id())
             .await
             .is_err()
     );
     mock.fail_post.store(false, Ordering::Relaxed);
-    listings::publication_status(&http, &data, actor(), item.id())
+    services::publication_status(&http, &data, actor(), item.id())
         .await
         .unwrap();
     {
@@ -136,7 +136,7 @@ async fn management_edits_latest_message_and_keeps_database_authoritative_on_fai
     }
     // Discordで投稿が削除されていても、販売終了の表示として復旧する。
     mock.missing_message.store(true, Ordering::Relaxed);
-    listings::publication_status(&http, &data, actor(), item.id())
+    services::publication_status(&http, &data, actor(), item.id())
         .await
         .unwrap();
     let mut read = data.database.begin_read().await.unwrap();
@@ -152,7 +152,7 @@ async fn management_edits_latest_message_and_keeps_database_authoritative_on_fai
 }
 
 #[tokio::test]
-async fn sale_resend_management_backup_restore_and_authorized_refund() {
+async fn 売買と商品管理を経てバックアップを復元しても無料再送と管理者返金ができる() {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
@@ -173,19 +173,19 @@ async fn sale_resend_management_backup_restore_and_authorized_refund() {
         .await
         .unwrap();
     let item = saved_item(&data).await;
-    listings::publication_status(&http, &data, actor(), item.id())
+    services::publication_status(&http, &data, actor(), item.id())
         .await
         .unwrap();
     let mut buy = component(&format!("content:buy:100:{}", item.id()), 201);
     buy.guild_id = Some(GuildId::new(100));
     buy.id = InteractionId::new(911);
-    purchases::handle_action(&http, &data, &buy, SystemTime::now())
+    services::purchase_action(&http, &data, &buy, SystemTime::now())
         .await
         .unwrap();
     assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 1200);
     let yes = component("content:confirm:100-911:yes", 201);
     assert!(
-        purchases::handle_action(&http, &data, &yes, SystemTime::now())
+        services::purchase_action(&http, &data, &yes, SystemTime::now())
             .await
             .unwrap()
             .0
@@ -200,7 +200,7 @@ async fn sale_resend_management_backup_restore_and_authorized_refund() {
         .buyer()
         .id();
     let resend = component(&format!("content:resend:100:{purchase}"), 201);
-    purchases::handle_action(&http, &data, &resend, SystemTime::now())
+    services::purchase_action(&http, &data, &resend, SystemTime::now())
         .await
         .unwrap();
     assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 700);
@@ -211,7 +211,7 @@ async fn sale_resend_management_backup_restore_and_authorized_refund() {
         actor(),
         item.id(),
         1,
-        listings::item_details("改訂版".into(), "".into(), "800").unwrap(),
+        services::item_details("改訂版".into(), "".into(), "800").unwrap(),
     )
     .await
     .unwrap();
@@ -238,7 +238,7 @@ async fn sale_resend_management_backup_restore_and_authorized_refund() {
     let restored = setup(&restored_directory).await;
     assert_eq!(restored.not.get_balance(buyer).await.unwrap().get(), 700);
     assert!(restored.shop.find(actor(), item.id()).await.is_err());
-    purchases::handle_action(&http, &restored, &resend, SystemTime::now())
+    services::purchase_action(&http, &restored, &resend, SystemTime::now())
         .await
         .unwrap();
     let files = mock
@@ -270,12 +270,12 @@ async fn sale_resend_management_backup_restore_and_authorized_refund() {
     assert_eq!(restored.not.get_balance(actor()).await.unwrap().get(), 0);
     let before = mock.posts().len();
     assert!(
-        purchases::handle_action(&http, &restored, &resend, SystemTime::now())
+        services::purchase_action(&http, &restored, &resend, SystemTime::now())
             .await
             .is_err()
     );
     assert!(
-        purchases::handle_action(&http, &restored, &yes, SystemTime::now())
+        services::purchase_action(&http, &restored, &yes, SystemTime::now())
             .await
             .is_err()
     );

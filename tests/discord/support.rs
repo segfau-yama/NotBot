@@ -1,4 +1,4 @@
-use super::{Data, content, listings::download_client};
+use super::{Data, content, services::download_client};
 use crate::{
     domain::{Actor, ItemDetails, Price, ShopItem},
     infrastructure::{

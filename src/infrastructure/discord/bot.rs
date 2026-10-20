@@ -1,14 +1,50 @@
-use std::{collections::HashMap, sync::Arc};
+use super::{commands, events, services};
 
+use crate::{
+    domain::{ChannelId, GuildId, ItemId, PurchaseQuote},
+    infrastructure::{
+        Error,
+        config::Config,
+        sqlite::{SqliteDatabaseAccess, not::NotUseCase, shop::ShopUseCase},
+    },
+};
 use serenity::all::{Client, Command, CreateAllowedMentions, GatewayIntents};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Weak},
+};
 use tokio::sync::Mutex;
 
-use super::{Data, commands, events, listings, roles, voice};
-use crate::infrastructure::{
-    Error,
-    config::Config,
-    sqlite::{SqliteDatabaseAccess, not::NotUseCase, shop::ShopUseCase},
-};
+pub struct Data {
+    pub(super) not: NotUseCase,
+    pub(super) shop: ShopUseCase,
+    pub(super) database: SqliteDatabaseAccess,
+    pub(super) content_dir: PathBuf,
+    pub(super) shop_channels: HashMap<GuildId, ChannelId>,
+    pub(super) download: reqwest::Client,
+    pub(super) publication_locks: Mutex<HashMap<ItemId, Weak<Mutex<()>>>>,
+    pub(super) drafts: Mutex<HashMap<u64, services::ListingDraft>>,
+    pub(super) uploads: Mutex<HashMap<u64, services::Upload>>,
+    pub(super) confirmations: Mutex<HashMap<String, PurchaseQuote>>,
+    pub(super) voice:
+        Mutex<HashMap<(serenity::all::GuildId, serenity::all::UserId), events::Attendance>>,
+}
+
+impl Data {
+    pub(super) async fn publication_lock(&self, item: ItemId) -> Arc<Mutex<()>> {
+        let mut locks = self.publication_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&item).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(item, Arc::downgrade(&lock));
+        lock
+    }
+}
+
+pub type Context<'a> = poise::ApplicationContext<'a, Arc<Data>, Error>;
 
 pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), Error> {
     let data = Arc::new(Data {
@@ -17,7 +53,7 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         database,
         content_dir: config.content_dir().clone(),
         shop_channels: config.shop_channels().clone(),
-        download: listings::download_client()?,
+        download: services::download_client()?,
         publication_locks: Mutex::new(HashMap::new()),
         drafts: Mutex::new(HashMap::new()),
         uploads: Mutex::new(HashMap::new()),
@@ -25,7 +61,7 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         voice: Mutex::new(HashMap::new()),
     });
     let voice_data = data.clone();
-    let commands = vec![commands::not(), commands::content(), roles::role()];
+    let commands = vec![commands::not(), commands::content(), commands::role()];
     let registration = poise::builtins::create_application_commands(&commands);
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
@@ -62,24 +98,22 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
     let http = client.http.clone();
     let cache = client.cache.clone();
     let result: Result<(), Error> = tokio::select! {
-        result = client.start() => result.map_err(Into::into),
-        result = shutdown_signal() => result.map_err(Into::into),
-        _ = voice::run(&http, &cache, &voice_data) => Ok(()),
-    };
+            result = client.start() => result.map_err(Into::into),
+            result = async {
+        #[cfg(unix)]
+        {
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => result,
+                _ = terminate.recv() => Ok(()),
+            }
+        }
+        #[cfg(not(unix))]
+        tokio::signal::ctrl_c().await
+    } => result.map_err(Into::into),
+            _ = events::reward_voice(&http, &cache, &voice_data) => Ok(()),
+        };
     client.shard_manager.shutdown_all().await;
     result
-}
-
-async fn shutdown_signal() -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result,
-            _ = terminate.recv() => Ok(()),
-        }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await
 }

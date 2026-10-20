@@ -1,3 +1,4 @@
+use crate::infrastructure::discord::test_support::actor;
 use std::{fs, sync::atomic::Ordering, time::Duration};
 
 use sea_orm::ConnectionTrait;
@@ -38,16 +39,16 @@ async fn offer(http: &Http, data: &Data, item: &ShopItem, request: u64) -> Resul
     let mut click = component(&format!("content:buy:100:{}", item.id()), 201);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(request);
-    handle_action(http, data, &click, SystemTime::now()).await?;
+    purchase_action(http, data, &click, SystemTime::now()).await?;
     Ok(format!("100-{request}"))
 }
 
 async fn act(http: &Http, data: &Data, id: &str) -> Result<(String, Vec<CreateActionRow>), Error> {
-    handle_action(http, data, &component(id, 201), SystemTime::now()).await
+    purchase_action(http, data, &component(id, 201), SystemTime::now()).await
 }
 
 #[tokio::test]
-async fn confirmation_defers_cancels_and_charges_once_even_after_restart_and_deletion() {
+async fn 購入確認は先に応答し取消では課金せず再操作や再起動後も一度だけ課金する() {
     let (directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -83,7 +84,7 @@ async fn confirmation_defers_cancels_and_charges_once_even_after_restart_and_del
     let id = offer(&http, &data, &item, 911).await.unwrap();
     let yes = format!("content:confirm:{id}:yes");
     assert!(
-        handle_action(&http, &data, &component(&yes, 202), SystemTime::now())
+        purchase_action(&http, &data, &component(&yes, 202), SystemTime::now())
             .await
             .is_err()
     );
@@ -110,7 +111,7 @@ async fn confirmation_defers_cancels_and_charges_once_even_after_restart_and_del
     let purchase = data.shop.list_purchases(buyer()).await.unwrap().remove(0);
     let resend = format!("content:resend:100:{}", purchase.buyer().id());
     assert!(
-        handle_action(&http, &data, &component(&resend, 202), SystemTime::now())
+        purchase_action(&http, &data, &component(&resend, 202), SystemTime::now())
             .await
             .is_err()
     );
@@ -128,7 +129,7 @@ async fn confirmation_defers_cancels_and_charges_once_even_after_restart_and_del
 }
 
 #[tokio::test]
-async fn dm_refusal_missing_file_membership_expiry_and_size_limit_never_charge() {
+async fn 購入確認の送信や所属やファイルの確認ができない場合は課金しない() {
     let (_directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -164,14 +165,14 @@ async fn dm_refusal_missing_file_membership_expiry_and_size_limit_never_charge()
     let mut click = component(&format!("content:confirm:{id}:yes"), 201);
     click.attachment_size_limit = 2;
     assert!(
-        handle_action(&http, &data, &click, SystemTime::now())
+        purchase_action(&http, &data, &click, SystemTime::now())
             .await
             .is_err()
     );
 
     let id = offer(&http, &data, &item, 924).await.unwrap();
     assert!(
-        handle_action(
+        purchase_action(
             &http,
             &data,
             &component(&format!("content:confirm:{id}:yes"), 201),
@@ -187,7 +188,7 @@ async fn dm_refusal_missing_file_membership_expiry_and_size_limit_never_charge()
 }
 
 #[tokio::test]
-async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_storage() {
+async fn 配送失敗後は購入一覧から無料で再送でき保存先は利用者に見せない() {
     let (directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
@@ -214,7 +215,7 @@ async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_sto
             .0
             .contains("送信しました")
     );
-    let (text, buttons) = prepare(
+    let (text, buttons) = prepare_purchase(
         &http,
         &data,
         buyer(),
@@ -267,7 +268,7 @@ async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_sto
             .await
             .unwrap();
     }
-    let (text, buttons) = list(&http, &data, buyer(), 0).await.unwrap();
+    let (text, buttons) = list_purchases(&http, &data, buyer(), 0).await.unwrap();
     assert!(text.starts_with("サーバー: テストサーバー\n購入一覧"));
     assert!(text.contains("1/2"));
     assert_eq!(
@@ -286,7 +287,7 @@ async fn delivery_failure_recovers_for_free_and_purchase_pages_do_not_expose_sto
 }
 
 #[tokio::test]
-async fn payment_failure_rolls_back_and_preserves_the_same_confirmation_recovery_button() {
+async fn 決済に失敗しても残高を変えず同じ購入確認から結果を照合できる() {
     let (directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
