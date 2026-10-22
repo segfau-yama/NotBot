@@ -1,5 +1,5 @@
 use super::Data;
-use crate::infrastructure::types as values;
+use crate::domain;
 use crate::{
     domain::{Actor, ShopItem},
     infrastructure::{MAX_CONTENT_BYTES, sqlite::SqliteDatabaseAccess},
@@ -44,9 +44,9 @@ impl Drop for TestDirectory {
 }
 
 pub(super) fn actor() -> Actor {
-    values::actor(
-        values::guild_id(100).unwrap(),
-        values::user_id(200).unwrap(),
+    domain::Actor::new(
+        domain::GuildId::new(100).unwrap(),
+        domain::UserId::new(200).unwrap(),
         false,
     )
 }
@@ -385,7 +385,7 @@ pub(super) async fn setup(directory: &TestDirectory) -> Data {
     Data::new(
         database,
         directory.0.join("private"),
-        HashMap::from([(actor().guild_id(), values::channel_id(400).unwrap())]),
+        HashMap::from([(actor().guild_id(), domain::ChannelId::new(400).unwrap())]),
     )
     .unwrap()
 }
@@ -398,7 +398,8 @@ pub(super) async fn saved_item(data: &Data) -> ShopItem {
     data.sqlite_shop
         .create(
             actor(),
-            values::item_details("資料集", "商品説明", values::price(500).unwrap()).unwrap(),
+            domain::ItemDetails::new("資料集", "商品説明", domain::Price::new(500).unwrap())
+                .unwrap(),
             saved,
         )
         .await

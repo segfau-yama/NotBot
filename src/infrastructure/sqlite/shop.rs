@@ -1,7 +1,8 @@
+use crate::domain;
 use crate::infrastructure::ValidationError;
 use crate::infrastructure::types as values;
 use sea_orm::QueryResult;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use crate::domain::{
     Actor, ChannelId, ContentFile, GuildId, ItemDetails, ItemId, ItemTarget, LedgerEntry,
@@ -22,35 +23,6 @@ impl ShopRepository {
         Self { database }
     }
 
-    /// 永続化前と履歴復元で共用する購入結果の整合性チェック。
-    pub fn purchase_result(
-        item: ShopItem,
-        buyer: LedgerEntry,
-        seller: Option<LedgerEntry>,
-    ) -> Result<PurchaseResult, DatabaseError> {
-        if buyer.guild_id() != item.guild_id()
-            || buyer.reason() != LedgerReason::Purchase(item.id())
-        {
-            return Err(DatabaseError::InvalidData);
-        }
-        let amount = values::negated(buyer.amount()).map_err(|_| DatabaseError::InvalidData)?;
-        if amount.get() <= 0
-            || (matches!(item.target(), ItemTarget::Content(_))
-                && (seller.is_none() || buyer.user_id() == item.seller_id()))
-        {
-            return Err(DatabaseError::InvalidData);
-        }
-        if let Some(sale) = &seller
-            && (sale.guild_id() != buyer.guild_id()
-                || sale.user_id() != item.seller_id()
-                || sale.reason() != LedgerReason::Sale(buyer.id())
-                || sale.amount() != amount)
-        {
-            return Err(DatabaseError::InvalidData);
-        }
-        Ok(PurchaseResult::new(item, buyer, seller))
-    }
-
     /// nowは外部入力でなく、呼び出し側が受付時に採取したサーバー時刻を渡す。
     pub async fn prepare_purchase(
         &self,
@@ -59,10 +31,7 @@ impl ShopRepository {
         request_id: &str,
         now: SystemTime,
     ) -> Result<PurchaseQuote, RepositoryError> {
-        values::validate_event_key(request_id)?;
-        let expires_at = now
-            .checked_add(Duration::from_secs(300))
-            .ok_or(ValidationError::InvalidExpiration)?;
+        domain::validate_event_key(request_id)?;
         let mut session = self.database.begin_read().await?;
         let item = session
             .find_item(actor.guild_id(), item_id)
@@ -74,8 +43,8 @@ impl ShopRepository {
             request_id.to_owned(),
             actor.user_id(),
             item,
-            expires_at,
-        ))
+            now,
+        )?)
     }
 
     /// 受付時のサーバー時刻で期限を判定する。確定済みの同一確認は期限を再判定しない。
@@ -97,7 +66,7 @@ impl ShopRepository {
         let seller = session
             .find_by_event_key(actor.guild_id(), &seller_key)
             .await?;
-        let amount = values::amount(quote.item().details().price().get());
+        let amount = domain::NotAmount::new(quote.item().details().price().get());
         match (buyer, seller) {
             (Some(buyer), seller) => {
                 if seller.is_none() && matches!(quote.item().target(), ItemTarget::Content(_)) {
@@ -106,7 +75,7 @@ impl ShopRepository {
                 if buyer.guild_id() != actor.guild_id()
                     || buyer.user_id() != actor.user_id()
                     || buyer.reason() != LedgerReason::Purchase(quote.item().id())
-                    || buyer.amount() != values::negated(amount)?
+                    || buyer.amount() != domain::NotAmount::negated(amount)?
                 {
                     return Err(RepositoryError::RequestConflict);
                 }
@@ -135,10 +104,10 @@ impl ShopRepository {
         }
         ShopRepository::validate_purchase(&mut session, actor, &item).await?;
         let buyer = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 actor.user_id(),
-                values::negated(amount)?,
+                domain::NotAmount::negated(amount)?,
                 LedgerReason::Purchase(item.id()),
                 buyer_key,
             )?)
@@ -146,7 +115,7 @@ impl ShopRepository {
         let seller = if matches!(item.target(), ItemTarget::Content(_)) {
             Some(
                 session
-                    .append_entry(values::new_ledger_entry(
+                    .append_entry(domain::NewLedgerEntry::new(
                         actor.guild_id(),
                         item.seller_id(),
                         amount,
@@ -158,7 +127,7 @@ impl ShopRepository {
         } else {
             None
         };
-        let result = Self::purchase_result(item, buyer, seller)?;
+        let result = PurchaseResult::new(item, buyer, seller).map_err(DatabaseError::from)?;
         session.commit().await?;
         Ok(result)
     }
@@ -168,7 +137,7 @@ impl ShopRepository {
         actor: Actor,
         confirmation_id: &str,
     ) -> Result<Option<PurchaseResult>, RepositoryError> {
-        values::validate_event_key(confirmation_id)?;
+        domain::validate_event_key(confirmation_id)?;
         let mut session = self.database.begin_read().await?;
         let buyer = session
             .find_by_event_key(
@@ -307,7 +276,7 @@ impl ShopRepository {
         request_id: &str,
         role_delivery: bool,
     ) -> Result<RefundResult, RepositoryError> {
-        values::validate_event_key(request_id)?;
+        domain::validate_event_key(request_id)?;
         let mut session = self.database.begin_write().await?;
         let buyer = session
             .find_entry(actor.guild_id(), purchase_id)
@@ -330,7 +299,7 @@ impl ShopRepository {
             .await?;
         match (buyer, seller) {
             (Some(buyer), seller) if seller.is_some() == purchase.seller().is_some() => {
-                let result = ShopRepository::refund_result(&purchase, buyer, seller)
+                let result = RefundResult::new(&purchase, buyer, seller)
                     .map_err(|_| RepositoryError::RequestConflict)?;
                 session.commit().await?;
                 return Ok(result);
@@ -344,12 +313,12 @@ impl ShopRepository {
         {
             return Err(RepositoryError::AlreadyRefunded);
         }
-        let buyer_amount = values::negated(purchase.buyer().amount())?;
+        let buyer_amount = domain::NotAmount::negated(purchase.buyer().amount())?;
         if purchase
             .seller()
             .is_none_or(|seller| seller.user_id() != purchase.buyer().user_id())
         {
-            values::apply_balance(
+            domain::Balance::apply(
                 session
                     .get_balance(actor.guild_id(), purchase.buyer().user_id())
                     .await?,
@@ -358,7 +327,7 @@ impl ShopRepository {
         }
         // 同一ユーザーの相殺でもSUMが途中で整数上限を超えないよう、負数行を先に記録する。
         let seller = if let Some(seller) = purchase.seller() {
-            let seller_amount = values::negated(seller.amount())?;
+            let seller_amount = domain::NotAmount::negated(seller.amount())?;
             if seller.user_id() != purchase.buyer().user_id() {
                 let balance = session
                     .get_balance(actor.guild_id(), seller.user_id())
@@ -366,11 +335,11 @@ impl ShopRepository {
                 if balance.get() < buyer_amount.get() {
                     return Err(RepositoryError::InsufficientBalance);
                 }
-                values::apply_balance(balance, seller_amount)?;
+                domain::Balance::apply(balance, seller_amount)?;
             }
             Some(
                 session
-                    .append_entry(values::new_ledger_entry(
+                    .append_entry(domain::NewLedgerEntry::new(
                         actor.guild_id(),
                         seller.user_id(),
                         seller_amount,
@@ -383,7 +352,7 @@ impl ShopRepository {
             None
         };
         let buyer = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 purchase.buyer().user_id(),
                 buyer_amount,
@@ -391,7 +360,7 @@ impl ShopRepository {
                 buyer_key,
             )?)
             .await?;
-        let result = ShopRepository::refund_result(&purchase, buyer, seller)?;
+        let result = RefundResult::new(&purchase, buyer, seller).map_err(DatabaseError::from)?;
         session.commit().await?;
         Ok(result)
     }
@@ -429,7 +398,7 @@ impl ShopRepository {
             session.commit().await?;
             return Ok(existing);
         }
-        let item = values::new_item(details, ItemTarget::Content(content.into_file()));
+        let item = domain::NewShopItem::new(details, ItemTarget::Content(content.into_file()));
         let item = session.append_content_item(actor, item).await?;
         session.commit().await?;
         Ok(item)
@@ -462,13 +431,16 @@ impl ShopRepository {
     }
 
     /// 一般閲覧。削除済みを含む内部照会にはSqliteSession::find_itemを使う。
-    pub async fn find(&self, actor: Actor, item_id: ItemId) -> Result<ShopItem, RepositoryError> {
+    pub async fn read(
+        &self,
+        actor: Actor,
+        item_id: ItemId,
+    ) -> Result<Option<ShopItem>, RepositoryError> {
         let mut session = self.database.begin_read().await?;
         let item = session
             .find_item(actor.guild_id(), item_id)
             .await?
-            .filter(|item| !item.is_deleted())
-            .ok_or(RepositoryError::ItemNotFound)?;
+            .filter(|item| !item.is_deleted());
         session.commit().await?;
         Ok(item)
     }
@@ -522,7 +494,7 @@ impl ShopRepository {
         expected_revision: i64,
         details: ItemDetails,
     ) -> Result<ShopItem, RepositoryError> {
-        let next_revision = ShopRepository::next_revision(expected_revision)?;
+        let next_revision = ShopItem::next_revision(expected_revision)?;
         let mut session = self.database.begin_write().await?;
         let current = ShopRepository::owned_item(&mut session, actor, item_id).await?;
         if current.revision() != expected_revision {
@@ -539,7 +511,7 @@ impl ShopRepository {
         if current.is_deleted() {
             return Err(RepositoryError::ItemDeleted);
         }
-        let next = values::shop_item(
+        let next = domain::ShopItem::new(
             current.id(),
             current.guild_id(),
             current.seller_id(),
@@ -559,7 +531,7 @@ impl ShopRepository {
         item_id: ItemId,
         expected_revision: i64,
     ) -> Result<ShopItem, RepositoryError> {
-        let next_revision = ShopRepository::next_revision(expected_revision)?;
+        let next_revision = ShopItem::next_revision(expected_revision)?;
         let mut session = self.database.begin_write().await?;
         let current = ShopRepository::owned_item(&mut session, actor, item_id).await?;
         if current.is_deleted() {
@@ -569,7 +541,7 @@ impl ShopRepository {
         if current.revision() != expected_revision {
             return Err(RepositoryError::RevisionConflict);
         }
-        let next = values::shop_item(
+        let next = domain::ShopItem::new(
             current.id(),
             current.guild_id(),
             current.seller_id(),
@@ -617,7 +589,7 @@ impl ShopRepository {
             .find_item(buyer.guild_id(), item_id)
             .await?
             .ok_or(DatabaseError::InvalidData)?;
-        Ok(ShopRepository::purchase_result(item, buyer, seller)?)
+        Ok(PurchaseResult::new(item, buyer, seller).map_err(DatabaseError::from)?)
     }
     async fn refund_state(
         session: &mut SqliteSession,
@@ -633,39 +605,13 @@ impl ShopRepository {
         };
         match (buyer, seller) {
             (None, None) => Ok(None),
-            (Some(buyer), seller) => Ok(Some(ShopRepository::refund_result(
-                purchase, buyer, seller,
-            )?)),
+            (Some(buyer), seller) => Ok(Some(
+                RefundResult::new(purchase, buyer, seller).map_err(DatabaseError::from)?,
+            )),
             _ => Err(DatabaseError::InvalidData.into()),
         }
     }
-    pub fn refund_result(
-        purchase: &PurchaseResult,
-        buyer: LedgerEntry,
-        seller: Option<LedgerEntry>,
-    ) -> Result<RefundResult, DatabaseError> {
-        if buyer.guild_id() != purchase.buyer().guild_id()
-            || buyer.user_id() != purchase.buyer().user_id()
-            || buyer.reason() != LedgerReason::Refund(purchase.buyer().id())
-            || buyer.amount()
-                != values::negated(purchase.buyer().amount())
-                    .map_err(|_| DatabaseError::InvalidData)?
-        {
-            return Err(DatabaseError::InvalidData);
-        }
-        match (purchase.seller(), seller.as_ref()) {
-            (Some(original), Some(refund))
-                if refund.guild_id() == original.guild_id()
-                    && refund.user_id() == original.user_id()
-                    && refund.reason() == LedgerReason::SaleRefund(original.id())
-                    && refund.amount()
-                        == values::negated(original.amount())
-                            .map_err(|_| DatabaseError::InvalidData)? => {}
-            (None, None) => {}
-            _ => return Err(DatabaseError::InvalidData),
-        }
-        Ok(RefundResult::new(buyer, seller))
-    }
+
     async fn validate_purchase(
         session: &mut SqliteSession,
         actor: Actor,
@@ -688,16 +634,16 @@ impl ShopRepository {
         {
             return Err(RepositoryError::AlreadyPurchased);
         }
-        let amount = values::amount(item.details().price().get());
+        let amount = domain::NotAmount::new(item.details().price().get());
         let buyer_balance = session
             .get_balance(actor.guild_id(), actor.user_id())
             .await?;
         if buyer_balance.get() < amount.get() {
             return Err(RepositoryError::InsufficientBalance);
         }
-        values::apply_balance(buyer_balance, values::negated(amount)?)?;
+        buyer_balance.after_purchase(item.details().price())?;
         if matches!(item.target(), ItemTarget::Content(_)) {
-            values::apply_balance(
+            domain::Balance::apply(
                 session
                     .get_balance(actor.guild_id(), item.seller_id())
                     .await?,
@@ -705,14 +651,6 @@ impl ShopRepository {
             )?;
         }
         Ok(())
-    }
-    fn next_revision(revision: i64) -> Result<i64, RepositoryError> {
-        if revision <= 0 {
-            return Err(ValidationError::InvalidRevision.into());
-        }
-        revision
-            .checked_add(1)
-            .ok_or(ValidationError::InvalidRevision.into())
     }
     async fn owned_item(
         session: &mut SqliteSession,
@@ -749,13 +687,13 @@ impl ShopRepository {
                 let filename: String = row.try_get("", "filename")?;
                 let size: i64 = row.try_get("", "size_bytes")?;
                 let size = u64::try_from(size).map_err(|_| DatabaseError::InvalidData)?;
-                ItemTarget::Content(values::content_file(key, filename, size)?)
+                ItemTarget::Content(domain::ContentFile::new(key, filename, size)?)
             }
             _ => return Err(DatabaseError::InvalidData),
         };
-        let details = values::item_details(name, description, values::price(price)?)?;
-        values::shop_item(
-            values::item_id(id)?,
+        let details = domain::ItemDetails::new(name, description, domain::Price::new(price)?)?;
+        domain::ShopItem::new(
+            domain::ItemId::new(id)?,
             values::parse_guild_id(&guild)?,
             values::parse_user_id(&seller)?,
             target,

@@ -1,6 +1,6 @@
 # Repositoryとデータの受け渡し
 
-DiscordとSQLiteに、それぞれ具体型のNotRepository・ShopRepositoryを置く。各Repositoryはデータの取得・変換・保存を担当し、他のRepositoryを参照しない。`commands`／`events` が両者を別々に呼び、ドメインの値を受け渡す。ドメインはデータを保持するだけで、変換・検証・Repositoryの呼び出しは行わない。
+DiscordとSQLiteに、それぞれ具体型のNotRepository・ShopRepositoryを置く。各Repositoryはデータの取得・変換・保存を担当し、他のRepositoryを参照しない。`commands`／`events` が両者を別々に呼び、ドメインの値を受け渡す。domainは業務データの不変条件・金額計算・結果の整合性を保証する。外部表記の変換とI/Oは各Repositoryで行い、domainからRepositoryは呼び出さない。設計方針は [DESIGN.md](DESIGN.md) を参照する。
 
 ```mermaid
 flowchart LR
@@ -22,9 +22,9 @@ sequenceDiagram
     participant S as sqlite::ShopRepository
     participant DB as SqliteSession
     U->>C: /content addで商品情報・ファイルを入力
-    C->>N: actor(ctxのギルド・本人)
+    C->>N: data.discord_not.actor(HTTP, ctxのギルド・本人)
     N-->>C: domain::Actor
-    C->>D: item_details(商品名・説明・価格)
+    C->>D: data.discord_shop.create(商品名・説明・価格)
     D-->>C: domain::ItemDetails
     C-->>U: プレビュー（DBへ保存しない）
     U->>C: 出品する
@@ -39,13 +39,13 @@ sequenceDiagram
     C-->>U: 商品のEmbed投稿・結果の返信
 ```
 
-Discordの `NotRepository` は所属・権限を `Actor` へ、`ShopRepository` は商品入力・ファイル保存結果をドメイン値へ変換する。SQLiteの `NotRepository` はNOTと報酬、`ShopRepository` は商品・公開記録・購入・返金を扱う。接続とSQL取引は既存の `SqliteDatabaseAccess`・`SqliteSession` を使う。共通の値変換はインフラ内の `types.rs` で再利用する。添付・ファイルI/OはDiscord ShopRepositoryのメソッドとして既存の `content.rs` に置く。
+Discordの `NotRepository` は所属・権限を `Actor` へ、`ShopRepository` は商品入力・ファイル保存結果をドメイン値へ変換する。両者は `Data.discord_not`・`Data.discord_shop` に保持し、インスタンスメソッドを呼ぶ。`NotRepository` はHTTPクライアントを保持せず、API取得に必要な `&Http` を引数で受け取る。SQLiteの `NotRepository` はNOTと報酬、`ShopRepository` は商品・公開記録・購入・返金を扱う。接続とSQL取引は既存の `SqliteDatabaseAccess`・`SqliteSession` を使う。共通の外部表記の解析はインフラ内の `types.rs` で再利用し、生成・業務上の検証はdomainの型へ依頼する。添付・ファイルI/OはDiscord ShopRepositoryのメソッドとして既存の `content.rs` に置く。
 
-DiscordのNotRepositoryが増減額・ギルドID、ShopRepositoryが商品ID・購入ID・ロールID・商品版を解析し、検証したドメイン値をcommandsへ返す。共通の変換はRepository内部から再利用する。domainのフィールドは非公開で、内部の生成メソッドは検証済みの値を格納する。既存値を直接書き換える入口は公開しない。
+DiscordのNotRepositoryが増減額・ギルドID、ShopRepositoryが商品CRUDの要求・購入ID・ロールID・商品版を解析し、domainの値をcommandsへ返す。商品入力は `create`、商品IDは `read`、変更・削除要求は `update`・`delete` で変換する。domainのフィールドは非公開で、生成メソッドが不変条件を検証する。既存値を直接書き換える入口は公開しない。
 
-`commands.rs` では `sqlite_not`・`sqlite_shop` がSQLiteのRepository、`discord_shop` がDiscordの商品Repositoryである。Poiseの親コマンド `content` はサブコマンドの入口で、処理は `add`・`update`・`delete` などに置く。`add` は変換済みの `ItemDetails` を下書きへ保持し、確定ボタンの `listing_action` がファイル保存→`sqlite_shop.create`→公開・返信を行う。取消や期限切れでは保存しない。
+`commands.rs` では `sqlite_not`・`sqlite_shop` がSQLiteのRepository、`discord_not`・`discord_shop` がDiscordのRepositoryである。Poiseの親コマンド `content` はサブコマンドの入口で、処理は `add`・`update`・`delete` などに置く。`add` は変換済みの `ItemDetails` を下書きへ保持し、確定ボタンの `listing_action` がファイル保存→`sqlite_shop.create`→公開・返信を行う。取消や期限切れでは保存しない。
 
-返信・購入確認・ロール操作は `commands.rs`、Gateway処理は `events.rs` に書く。Poiseの `Data` にRepositoryと対話状態を保持し、その対話処理をcommands／eventsに実装する。追加の中間層やTraitは置かない。
+返信・購入確認・ロール操作は `commands.rs`、Gateway処理は `events.rs` に書く。Poiseの `Data` にRepositoryと対話状態を保持し、その対話処理をcommands／eventsに実装する。中継するだけの層やstructは置かない。
 
 ## NOT
 
@@ -68,7 +68,7 @@ DiscordのNotRepositoryが増減額・ギルドID、ShopRepositoryが商品ID・
 |---|---|
 | `create` | 保存済みの `StoredContent` と商品情報を登録。同じ保存キーの再試行は元の商品を返す。 |
 | `create_role` | 管理者が既存ロールを商品登録。ギルド・ロールと初版で再試行を照合。 |
-| `find`・`list` | 対象ギルドの販売中商品を取得。 |
+| `read`・`list` | 対象ギルドの販売中商品を取得。`read`は未登録・削除済み・別ギルドの商品に`None`を返す。 |
 | `get_publication`・`record_publication` | 出品者本人を照合し、削除版を含む商品と公開記録を取得・追記。Discordの投稿処理はcommandsで行う。 |
 | `update`・`delete` | 出品者本人と期待する版を照合し、新版・削除版を追記。 |
 | `prepare_purchase` | 本人・ギルド・商品版・価格に結び付いた5分間の確認を作る。課金しない。 |
@@ -94,4 +94,4 @@ DiscordのNotRepositoryが増減額・ギルドID、ShopRepositoryが商品ID・
 
 SQL・索引・一意制約・公開記録は [DATABASE.md](DATABASE.md)を参照する。
 
-購入結果と返金結果の生成は `sqlite::shop::ShopRepository::purchase_result`・`refund_result` に集約する。不一致な元取引・本人・ギルド・金額・片側欠落は拒否する。新規処理のCOMMIT前と履歴の復元で共用し、検証なしに結果を組み立てる経路は持たない。
+購入結果と返金結果の生成はdomainの `PurchaseResult::new`・`RefundResult::new` に集約する。不一致な元取引・本人・ギルド・金額・片側欠落は拒否する。新規処理のCOMMIT前と履歴の復元で共用し、検証なしに結果を組み立てる経路は持たない。

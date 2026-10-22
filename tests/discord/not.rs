@@ -1,3 +1,4 @@
+use crate::domain;
 use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
 use crate::infrastructure::types as values;
 use std::sync::atomic::Ordering;
@@ -16,22 +17,29 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    let a = DiscordNotRepository::target_guild(Some(GuildId::new(100)), None).unwrap();
-    let b = DiscordNotRepository::target_guild(None, Some("101")).unwrap();
-    let admin = DiscordNotRepository::new(&http)
-        .authenticate(a, UserId::new(999))
+    let a = data
+        .discord_not
+        .target_guild(Some(GuildId::new(100)), None)
+        .unwrap();
+    let b = data.discord_not.target_guild(None, Some("101")).unwrap();
+    let admin = data
+        .discord_not
+        .authenticate(&http, a, UserId::new(999))
         .await
         .unwrap();
-    let viewer = DiscordNotRepository::new(&http)
-        .authenticate(a, UserId::new(200))
+    let viewer = data
+        .discord_not
+        .authenticate(&http, a, UserId::new(200))
         .await
         .unwrap();
-    let other_guild_viewer = DiscordNotRepository::new(&http)
-        .authenticate(b, UserId::new(200))
+    let other_guild_viewer = data
+        .discord_not
+        .authenticate(&http, b, UserId::new(200))
         .await
         .unwrap();
-    let target = DiscordNotRepository::new(&http)
-        .adjustment_target(admin, UserId::new(200))
+    let target = data
+        .discord_not
+        .adjustment_target(&http, admin, UserId::new(200))
         .await
         .unwrap();
     let balance = values::parse_balance("1200").unwrap();
@@ -48,9 +56,11 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
         entry
     );
     assert_eq!(data.sqlite_not.get_balance(viewer).await.unwrap(), balance);
-    let dm = DiscordNotRepository::new(&http)
+    let dm = data
+        .discord_not
         .authenticate(
-            DiscordNotRepository::target_guild(None, Some("100")).unwrap(),
+            &http,
+            data.discord_not.target_guild(None, Some("100")).unwrap(),
             UserId::new(200),
         )
         .await
@@ -61,7 +71,7 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
             .get_balance(other_guild_viewer)
             .await
             .unwrap(),
-        values::balance(0).unwrap()
+        domain::Balance::new(0).unwrap()
     );
     assert_eq!(
         data.sqlite_not.get_ranking(viewer, 10).await.unwrap()[0].user_id(),
@@ -75,8 +85,8 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
             .is_empty()
     );
     assert!(
-        DiscordNotRepository::new(&http)
-            .adjustment_target(viewer, UserId::new(200))
+        data.discord_not
+            .adjustment_target(&http, viewer, UserId::new(200))
             .await
             .is_err()
     );
@@ -90,40 +100,49 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
     let member = http.get_member(a, UserId::new(200)).await.unwrap();
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::MANAGE_GUILD;
     assert!(
-        !DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
+        !data
+            .discord_not
+            .authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::ADMINISTRATOR;
     assert!(
-        DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
+        data.discord_not
+            .authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::empty();
     assert!(
-        !DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
+        !data
+            .discord_not
+            .authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
-    assert!(DiscordNotRepository::authenticated_actor(&guild, &member, UserId::new(201)).is_err());
+    assert!(
+        data.discord_not
+            .authenticated_actor(&guild, &member, UserId::new(201))
+            .is_err()
+    );
     mock.deny_member.store(true, Ordering::Relaxed);
     assert!(
-        DiscordNotRepository::new(&http)
-            .authenticate(a, UserId::new(200))
+        data.discord_not
+            .authenticate(&http, a, UserId::new(200))
             .await
             .is_err()
     );
     assert!(
-        DiscordNotRepository::new(&http)
-            .adjustment_target(admin, UserId::new(200))
+        data.discord_not
+            .adjustment_target(&http, admin, UserId::new(200))
             .await
             .is_err()
     );
     mock.deny_member.store(false, Ordering::Relaxed);
     assert!(
-        DiscordNotRepository::new(&http)
-            .authenticate(GuildId::new(102), UserId::new(200))
+        data.discord_not
+            .authenticate(&http, GuildId::new(102), UserId::new(200))
             .await
             .is_err()
     );
@@ -132,9 +151,14 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
 
 #[test]
 fn サーバー内から別サーバーは指定できず個別の会話では指定が必要である() {
-    assert!(DiscordNotRepository::target_guild(None, None).is_err());
-    assert!(DiscordNotRepository::target_guild(Some(GuildId::new(100)), Some("101")).is_err());
-    assert!(DiscordNotRepository::target_guild(None, Some("0")).is_err());
+    let discord_not = DiscordNotRepository;
+    assert!(discord_not.target_guild(None, None).is_err());
+    assert!(
+        discord_not
+            .target_guild(Some(GuildId::new(100)), Some("101"))
+            .is_err()
+    );
+    assert!(discord_not.target_guild(None, Some("0")).is_err());
 }
 
 #[test]
@@ -150,6 +174,7 @@ fn 残高の入力は64ビットの非負整数に限る() {
 
 #[test]
 fn 増減額の入力は符号付き六十四ビット整数として検証する() {
+    let discord_not = DiscordNotRepository;
     for (input, expected) in [
         ("-9223372036854775808", i64::MIN),
         ("9223372036854775807", i64::MAX),
@@ -157,10 +182,7 @@ fn 増減額の入力は符号付き六十四ビット整数として検証す�
         ("+500", 500),
         ("-500", -500),
     ] {
-        assert_eq!(
-            DiscordNotRepository::parse_amount(input).unwrap().get(),
-            expected
-        );
+        assert_eq!(discord_not.parse_amount(input).unwrap().get(), expected);
     }
     for input in [
         "",
@@ -172,10 +194,7 @@ fn 増減額の入力は符号付き六十四ビット整数として検証す�
         "9223372036854775808",
         "-9223372036854775809",
     ] {
-        assert!(
-            DiscordNotRepository::parse_amount(input).is_err(),
-            "{input}"
-        );
+        assert!(discord_not.parse_amount(input).is_err(), "{input}");
     }
 }
 

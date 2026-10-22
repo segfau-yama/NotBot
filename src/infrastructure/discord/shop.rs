@@ -1,3 +1,4 @@
+use crate::domain;
 use crate::{
     domain::{ChannelId, ItemDetails, ItemId, LedgerEntryId, MessageId, RoleId},
     infrastructure::{Error, ValidationError, types as values},
@@ -12,25 +13,27 @@ impl ShopRepository {
     pub fn new(directory: PathBuf) -> Self {
         Self { directory }
     }
-    pub(super) fn parse_item_id(value: &str) -> Result<ItemId, ValidationError> {
+    pub fn read(&self, value: &str) -> Result<ItemId, ValidationError> {
         values::parse_item_id(value)
     }
-    pub(super) fn parse_purchase_id(value: &str) -> Result<LedgerEntryId, ValidationError> {
+    pub(super) fn parse_purchase_id(&self, value: &str) -> Result<LedgerEntryId, ValidationError> {
         values::parse_ledger_entry_id(value)
     }
-    pub(super) fn parse_role_id(value: &str) -> Result<RoleId, ValidationError> {
+    pub(super) fn parse_role_id(&self, value: &str) -> Result<RoleId, ValidationError> {
         values::parse_role_id(value)
     }
     pub(super) fn publication_ids(
+        &self,
         channel: serenity::all::ChannelId,
         message: serenity::all::MessageId,
     ) -> Result<(ChannelId, MessageId), ValidationError> {
         Ok((
-            values::channel_id(channel.get())?,
-            values::message_id(message.get())?,
+            domain::ChannelId::new(channel.get())?,
+            domain::MessageId::new(message.get())?,
         ))
     }
-    pub(super) fn item_details(
+    pub fn create(
+        &self,
         title: String,
         description: String,
         price: &str,
@@ -41,13 +44,30 @@ impl ShopRepository {
         }
         let amount =
             values::parse_balance(price).map_err(|_| "価格は正のNOT整数で指定してください。")?;
-        Ok(values::item_details(
+        Ok(domain::ItemDetails::new(
             title,
             description,
-            values::price(amount.get())?,
+            domain::Price::new(amount.get())?,
         )?)
     }
-    pub(super) fn parse_revision(value: &str) -> Result<i64, Error> {
+
+    pub fn update(
+        &self,
+        id: &str,
+        revision: &str,
+        title: String,
+        description: String,
+        price: &str,
+    ) -> Result<(ItemId, i64, ItemDetails), Error> {
+        let id = self.read(id)?;
+        let revision = self.parse_revision(revision)?;
+        Ok((id, revision, self.create(title, description, price)?))
+    }
+
+    pub fn delete(&self, id: &str, revision: &str) -> Result<(ItemId, i64), Error> {
+        Ok((self.read(id)?, self.parse_revision(revision)?))
+    }
+    pub(super) fn parse_revision(&self, value: &str) -> Result<i64, Error> {
         if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
             return Err(crate::infrastructure::ValidationError::InvalidRevision.into());
         }

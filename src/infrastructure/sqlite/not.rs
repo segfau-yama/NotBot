@@ -1,3 +1,4 @@
+use crate::domain;
 use crate::infrastructure::types as values;
 use sea_orm::QueryResult;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,7 +48,7 @@ impl NotRepository {
         if !actor.can_manage_not() {
             return Err(RepositoryError::PermissionDenied);
         }
-        values::validate_event_key(request_id)?;
+        domain::validate_event_key(request_id)?;
         let event_key = format!("adjust-amount:{request_id}");
         let mut session = self.database.begin_write().await?;
         if let Some(existing) = session
@@ -64,9 +65,9 @@ impl NotRepository {
             return Ok(existing);
         }
         let balance = session.get_balance(actor.guild_id(), user_id).await?;
-        values::apply_balance(balance, amount)?;
+        domain::Balance::apply(balance, amount)?;
         let entry = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 user_id,
                 amount,
@@ -108,8 +109,8 @@ impl NotRepository {
             session.commit().await?;
             return Ok(None);
         }
-        let amount = values::amount(1);
-        values::apply_balance(
+        let amount = domain::NotAmount::new(1);
+        domain::Balance::apply(
             session
                 .get_balance(actor.guild_id(), actor.user_id())
                 .await?,
@@ -117,7 +118,7 @@ impl NotRepository {
         )?;
         // shortcut: 通話はADJUSTMENTとvoice:キーで記録する。専用の理由表示が必要ならDB制約も移行する。
         let entry = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 actor.user_id(),
                 amount,
@@ -137,14 +138,14 @@ impl NotRepository {
         request_id: &str,
         now: SystemTime,
     ) -> Result<Option<LedgerEntry>, RepositoryError> {
-        let amount = values::amount(match reason {
+        let amount = domain::NotAmount::new(match reason {
             LedgerReason::Message => 5,
             LedgerReason::Reaction => 1,
             LedgerReason::ReactionReceived => 10,
             LedgerReason::ReplyReceived => 20,
             _ => return Err(RepositoryError::InvalidRewardReason),
         });
-        values::validate_event_key(request_id)?;
+        domain::validate_event_key(request_id)?;
         let key = format!("reward:{}:{request_id}", values::reason_code(reason));
         let mut session = self.database.begin_write().await?;
         if let Some((user, saved_reason, entry)) = session.find_reward_event(actor, &key).await? {
@@ -179,7 +180,7 @@ impl NotRepository {
             .filter(|now| now.checked_add(32_400_000 + 86_400_000).is_some())
             .ok_or(RepositoryError::InvalidRewardTime)?;
         let entry = if session.reward_allowed(actor, reason, now).await? {
-            values::apply_balance(
+            domain::Balance::apply(
                 session
                     .get_balance(actor.guild_id(), actor.user_id())
                     .await?,
@@ -187,7 +188,7 @@ impl NotRepository {
             )?;
             Some(
                 session
-                    .append_entry(values::new_ledger_entry(
+                    .append_entry(domain::NewLedgerEntry::new(
                         actor.guild_id(),
                         actor.user_id(),
                         amount,
@@ -226,7 +227,7 @@ impl NotRepository {
         if !matches!(amount, 100 | 500 | 1000) {
             return Err(RepositoryError::InvalidTransferAmount);
         }
-        values::validate_event_key(request_id)?;
+        domain::validate_event_key(request_id)?;
         let sent_key = format!("transfer:{request_id}:sent");
         let received_key = format!("transfer:{request_id}:received");
         let mut session = self.database.begin_write().await?;
@@ -259,24 +260,24 @@ impl NotRepository {
         if sender_balance.get() < amount {
             return Err(RepositoryError::InsufficientBalance);
         }
-        values::apply_balance(
+        domain::Balance::apply(
             session.get_balance(actor.guild_id(), recipient).await?,
-            values::amount(amount),
+            domain::NotAmount::new(amount),
         )?;
         let sent = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 actor.user_id(),
-                values::amount(-amount),
+                domain::NotAmount::new(-amount),
                 LedgerReason::TipSent,
                 sent_key,
             )?)
             .await?;
         let received = session
-            .append_entry(values::new_ledger_entry(
+            .append_entry(domain::NewLedgerEntry::new(
                 actor.guild_id(),
                 recipient,
-                values::amount(amount),
+                domain::NotAmount::new(amount),
                 LedgerReason::TipReceived,
                 received_key,
             )?)
@@ -296,7 +297,7 @@ impl NotRepository {
         if !actor.can_manage_not() {
             return Err(RepositoryError::PermissionDenied);
         }
-        values::validate_event_key(request_id)?;
+        domain::validate_event_key(request_id)?;
         let event_key = format!("adjust:{request_id}");
         let mut session = self.database.begin_write().await?;
         if let Some(existing) = session
@@ -319,11 +320,11 @@ impl NotRepository {
             return Ok(existing);
         }
         let current = session.get_balance(actor.guild_id(), user_id).await?;
-        let amount = values::checked_sub(
-            values::amount(target_balance.get()),
-            values::amount(current.get()),
+        let amount = domain::NotAmount::checked_sub(
+            domain::NotAmount::new(target_balance.get()),
+            domain::NotAmount::new(current.get()),
         )?;
-        let entry = values::new_ledger_entry(
+        let entry = domain::NewLedgerEntry::new(
             actor.guild_id(),
             user_id,
             amount,
@@ -356,24 +357,24 @@ impl NotRepository {
             ("TIP_RECEIVED", None, None, None) => LedgerReason::TipReceived,
             ("TIMEOUT", None, None, None) => LedgerReason::Timeout,
             ("ADJUSTMENT", None, None, None) => LedgerReason::Adjustment,
-            ("PURCHASE", Some(id), None, None) => LedgerReason::Purchase(values::item_id(id)?),
-            ("SALE", None, Some(id), None) => LedgerReason::Sale(values::ledger_entry_id(id)?),
-            ("REFUND", None, None, Some(id)) => LedgerReason::Refund(values::ledger_entry_id(id)?),
+            ("PURCHASE", Some(id), None, None) => LedgerReason::Purchase(domain::ItemId::new(id)?),
+            ("SALE", None, Some(id), None) => LedgerReason::Sale(domain::LedgerEntryId::new(id)?),
+            ("REFUND", None, None, Some(id)) => {
+                LedgerReason::Refund(domain::LedgerEntryId::new(id)?)
+            }
             ("SALE_REFUND", None, None, Some(id)) => {
-                LedgerReason::SaleRefund(values::ledger_entry_id(id)?)
+                LedgerReason::SaleRefund(domain::LedgerEntryId::new(id)?)
             }
             _ => return Err(DatabaseError::InvalidData),
         };
-        values::ledger_entry(
-            values::ledger_entry_id(id)?,
+        domain::LedgerEntry::new(
+            domain::LedgerEntryId::new(id)?,
             values::parse_guild_id(&guild)?,
             values::parse_user_id(&user)?,
-            values::amount(amount),
+            domain::NotAmount::new(amount),
             reason,
             key,
         )
         .map_err(Into::into)
     }
 }
-
-impl NotRepository {}

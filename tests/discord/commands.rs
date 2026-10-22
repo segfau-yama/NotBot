@@ -1,5 +1,4 @@
-use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
-use crate::infrastructure::types as values;
+use crate::domain;
 use std::sync::atomic::Ordering;
 
 use serenity::{
@@ -15,29 +14,32 @@ async fn 残高調整は管理者だけが行え所属するメンバー間で�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    let sender = DiscordNotRepository::new(&http)
-        .authenticate(GuildId::new(100), UserId::new(200))
+    let sender = data
+        .discord_not
+        .authenticate(&http, GuildId::new(100), UserId::new(200))
         .await
         .unwrap();
-    let admin = DiscordNotRepository::new(&http)
-        .authenticate(GuildId::new(100), UserId::new(999))
+    let admin = data
+        .discord_not
+        .authenticate(&http, GuildId::new(100), UserId::new(999))
         .await
         .unwrap();
     assert!(
-        DiscordNotRepository::new(&http)
-            .adjustment_target(sender, UserId::new(201))
+        data.discord_not
+            .adjustment_target(&http, sender, UserId::new(201))
             .await
             .is_err()
     );
-    let recipient = DiscordNotRepository::new(&http)
-        .member_target(sender, UserId::new(201))
+    let recipient = data
+        .discord_not
+        .member_target(&http, sender, UserId::new(201))
         .await
         .unwrap();
     data.sqlite_not
         .adjust_balance(
             admin,
             sender.user_id(),
-            values::balance(1200).unwrap(),
+            domain::Balance::new(1200).unwrap(),
             "seed",
         )
         .await
@@ -46,8 +48,9 @@ async fn 残高調整は管理者だけが行え所属するメンバー間で�
         .transfer(sender, recipient, 500, "interaction")
         .await
         .unwrap();
-    let target = DiscordNotRepository::new(&http)
-        .adjustment_target(admin, UserId::new(201))
+    let target = data
+        .discord_not
+        .adjustment_target(&http, admin, UserId::new(201))
         .await
         .unwrap();
     let penalty = data
@@ -55,7 +58,7 @@ async fn 残高調整は管理者だけが行え所属するメンバー間で�
         .adjust_amount(
             admin,
             target,
-            values::amount(-100),
+            domain::NotAmount::new(-100),
             "adjustment-interaction",
         )
         .await
@@ -67,14 +70,14 @@ async fn 残高調整は管理者だけが行え所属するメンバー間で�
     );
     mock.deny_member.store(true, Ordering::Relaxed);
     assert!(
-        DiscordNotRepository::new(&http)
-            .authenticate(GuildId::new(100), UserId::new(200))
+        data.discord_not
+            .authenticate(&http, GuildId::new(100), UserId::new(200))
             .await
             .is_err()
     );
     assert!(
-        DiscordNotRepository::new(&http)
-            .member_target(sender, UserId::new(201))
+        data.discord_not
+            .member_target(&http, sender, UserId::new(201))
             .await
             .is_err()
     );

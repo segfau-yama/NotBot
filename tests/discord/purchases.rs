@@ -1,6 +1,6 @@
+use crate::domain;
 use crate::infrastructure::discord::Data;
 use crate::infrastructure::discord::test_support::actor;
-use crate::infrastructure::types as values;
 use std::{fs, sync::atomic::Ordering, time::Duration};
 
 use sea_orm::ConnectionTrait;
@@ -13,19 +13,19 @@ use crate::{
 };
 
 fn buyer() -> Actor {
-    values::actor(actor().guild_id(), values::user_id(201).unwrap(), false)
+    domain::Actor::new(actor().guild_id(), domain::UserId::new(201).unwrap(), false)
 }
 
 async fn scenario() -> (TestDirectory, Data, ShopItem) {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let item = saved_item(&data).await;
-    let admin = values::actor(actor().guild_id(), actor().user_id(), true);
+    let admin = domain::Actor::new(actor().guild_id(), actor().user_id(), true);
     data.sqlite_not
         .adjust_balance(
             admin,
             buyer().user_id(),
-            values::balance(1200).unwrap(),
+            domain::Balance::new(1200).unwrap(),
             "fund",
         )
         .await
@@ -132,7 +132,7 @@ async fn 購入確認は先に応答し取消では課金せず再操作や再�
             .await
             .is_err()
     );
-    let admin = values::actor(actor().guild_id(), actor().user_id(), true);
+    let admin = domain::Actor::new(actor().guild_id(), actor().user_id(), true);
     data.sqlite_shop
         .refund(admin, purchase.buyer().id(), "refund")
         .await
@@ -281,7 +281,7 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
             .discord_shop
             .store_content(actor(), &format!("page-{request}"), "a.txt", &b"x"[..])
             .unwrap();
-        let details = values::item_details("商品", "", values::price(1).unwrap()).unwrap();
+        let details = domain::ItemDetails::new("商品", "", domain::Price::new(1).unwrap()).unwrap();
         let item = data
             .sqlite_shop
             .create(actor(), details, stored)

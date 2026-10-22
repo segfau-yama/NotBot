@@ -1,3 +1,4 @@
+use crate::domain;
 use crate::domain::*;
 use crate::infrastructure::sqlite::not::NotRepository as SqliteNotRepository;
 use crate::infrastructure::sqlite::shop::ShopRepository as SqliteShopRepository;
@@ -370,7 +371,7 @@ impl SqliteSession {
                 .await?
                 .ok_or(DatabaseError::InvalidData)?;
             let value: i64 = row.try_get("", "balance")?;
-            values::balance(value).map_err(Into::into)
+            domain::Balance::new(value).map_err(Into::into)
         }
         .await;
         self.finish_operation(transaction, result).await
@@ -397,7 +398,7 @@ impl SqliteSession {
                     let balance: i64 = row.try_get("", "balance")?;
                     Ok(UserBalance::new(
                         values::parse_user_id(&user)?,
-                        values::balance(balance)?,
+                        domain::Balance::new(balance)?,
                     ))
                 })
                 .collect()
@@ -443,7 +444,7 @@ impl SqliteSession {
                 .await?
                 .ok_or(DatabaseError::InvalidData)?;
             let balance: i64 = row.try_get("", "balance")?;
-            values::balance(balance).map_err(Into::into)
+            domain::Balance::new(balance).map_err(Into::into)
         }
         .await;
         self.finish_operation(transaction, result).await
@@ -493,9 +494,9 @@ impl SqliteSession {
             }
             let id = i64::try_from(inserted.last_insert_id())
                 .ok()
-                .and_then(|id| values::ledger_entry_id(id).ok())
+                .and_then(|id| domain::LedgerEntryId::new(id).ok())
                 .ok_or(DatabaseError::InvalidData)?;
-            values::ledger_entry(
+            domain::LedgerEntry::new(
                 id,
                 entry.guild_id(),
                 entry.user_id(),
@@ -589,7 +590,7 @@ impl SqliteSession {
                 "INSERT INTO shop_item (guild_id, seller_id, kind, target) VALUES ({guild}, {seller}, 'ROLE', {target})"
             )).await?;
             let id = i64::try_from(inserted.last_insert_id()).map_err(|_| DatabaseError::InvalidData)?;
-            let item = values::shop_item(values::item_id(id)?, actor.guild_id(), actor.user_id(), ItemTarget::Role(role), details, 1, false)?;
+            let item = domain::ShopItem::new(domain::ItemId::new(id)?, actor.guild_id(), actor.user_id(), ItemTarget::Role(role), details, 1, false)?;
             insert_revision(&transaction, &item).await?;
             Ok(item)
         }.await;
@@ -658,8 +659,8 @@ impl SqliteSession {
                 [actor.guild_id().to_string().into(), actor.user_id().to_string().into(), file.key().into()],
             )).await?;
             let id = i64::try_from(inserted.last_insert_id()).ok()
-                .and_then(|id| values::item_id(id).ok()).ok_or(DatabaseError::InvalidData)?;
-            let item = values::shop_item(id, actor.guild_id(), actor.user_id(), item.target().clone(), item.details().clone(), 1, false)?;
+                .and_then(|id| domain::ItemId::new(id).ok()).ok_or(DatabaseError::InvalidData)?;
+            let item = domain::ShopItem::new(id, actor.guild_id(), actor.user_id(), item.target().clone(), item.details().clone(), 1, false)?;
             insert_revision(&transaction, &item).await?;
             Ok(item)
         }.await;
@@ -808,7 +809,7 @@ impl SqliteSession {
                     Ok((
                         values::parse_user_id(&user)?,
                         row.try_get("", "reason")?,
-                        entry.map(values::ledger_entry_id).transpose()?,
+                        entry.map(domain::LedgerEntryId::new).transpose()?,
                     ))
                 })
                 .transpose()

@@ -1,8 +1,6 @@
+use crate::domain;
 use crate::infrastructure::discord::Data;
-use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
-use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
 use crate::infrastructure::discord::test_support::actor;
-use crate::infrastructure::types as values;
 use std::{sync::atomic::Ordering, time::SystemTime};
 
 use serenity::json::{json, to_value};
@@ -11,10 +9,10 @@ use super::*;
 use crate::infrastructure::discord::test_support::*;
 
 fn seller() -> Actor {
-    values::actor(actor().guild_id(), values::user_id(999).unwrap(), true)
+    domain::Actor::new(actor().guild_id(), domain::UserId::new(999).unwrap(), true)
 }
 fn buyer() -> Actor {
-    values::actor(actor().guild_id(), values::user_id(201).unwrap(), false)
+    domain::Actor::new(actor().guild_id(), domain::UserId::new(201).unwrap(), false)
 }
 async fn scenario() -> (TestDirectory, Data, ShopItem) {
     let directory = TestDirectory::new();
@@ -23,7 +21,7 @@ async fn scenario() -> (TestDirectory, Data, ShopItem) {
         .adjust_balance(
             seller(),
             buyer().user_id(),
-            values::balance(1200).unwrap(),
+            domain::Balance::new(1200).unwrap(),
             "fund",
         )
         .await
@@ -32,8 +30,9 @@ async fn scenario() -> (TestDirectory, Data, ShopItem) {
         .sqlite_shop
         .create_role(
             seller(),
-            values::role_id(500).unwrap(),
-            DiscordShopRepository::item_details("会員権".into(), "会員ロール".into(), "500")
+            domain::RoleId::new(500).unwrap(),
+            data.discord_shop
+                .create("会員権".into(), "会員ロール".into(), "500")
                 .unwrap(),
         )
         .await
@@ -67,13 +66,13 @@ async fn ロール販売は管理権限と階層を確認し売買後の返金�
     let mock = MockDiscord::new();
     let http = mock.http();
     assert!(
-        DiscordNotRepository::new(&http)
-            .authenticate(GuildId::new(100), UserId::new(999))
+        data.discord_not
+            .authenticate(&http, GuildId::new(100), UserId::new(999))
             .await
             .unwrap()
             .can_manage_not()
     );
-    let role = values::role_id(500).unwrap();
+    let role = domain::RoleId::new(500).unwrap();
     assert!(
         data.sqlite_shop
             .create_role(actor(), role, item.details().clone())
@@ -216,7 +215,7 @@ async fn 出品者本人のロール購入も代金を減らし返金は元の�
         .adjust_balance(
             seller(),
             seller().user_id(),
-            values::balance(i64::MAX).unwrap(),
+            domain::Balance::new(i64::MAX).unwrap(),
             "seller-fund",
         )
         .await
@@ -281,7 +280,7 @@ async fn 出品者本人のロール購入も代金を減らし返金は元の�
         .adjust_balance(
             seller(),
             seller().user_id(),
-            values::balance(0).unwrap(),
+            domain::Balance::new(0).unwrap(),
             "seller-spent",
         )
         .await
@@ -405,7 +404,7 @@ async fn 返金で購入者の残高上限を超える場合は権利を維持�
         .adjust_balance(
             seller(),
             buyer().user_id(),
-            values::balance(i64::MAX).unwrap(),
+            domain::Balance::new(i64::MAX).unwrap(),
             "buyer-at-limit",
         )
         .await
@@ -443,7 +442,7 @@ async fn 返金で購入者の残高上限を超える場合は権利を維持�
         data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
         i64::MAX
     );
-    let foreign = values::actor(values::guild_id(101).unwrap(), buyer().user_id(), true);
+    let foreign = domain::Actor::new(domain::GuildId::new(101).unwrap(), buyer().user_id(), true);
     assert!(data.deliver_role(&http, foreign, purchase).await.is_err());
     assert!(
         data.refund_role(&http, foreign, purchase, "foreign")

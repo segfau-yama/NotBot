@@ -1,6 +1,6 @@
 //! Bot専用の永続ディスクへの保存。ネットワーク取得は呼び出し側で行う。
+use crate::domain;
 use crate::infrastructure::ValidationError;
-use crate::infrastructure::types as values;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -28,9 +28,10 @@ pub enum ContentStorageError {
 
 impl super::shop::ShopRepository {
     pub(super) fn validate_attachment(
+        &self,
         file: &serenity::all::Attachment,
     ) -> Result<(), crate::infrastructure::Error> {
-        values::content_file("preview", &file.filename, file.size.into())?;
+        domain::ContentFile::new("preview", &file.filename, file.size.into())?;
         if u64::from(file.size) > MAX_CONTENT_BYTES || file.filename.len() > 255 {
             return Err("ファイルは有効な名前で、1バイト〜20 MiBにしてください。".into());
         }
@@ -48,18 +49,20 @@ impl super::shop::ShopRepository {
         Ok(())
     }
     pub(super) async fn download_attachment(
+        &self,
         client: &reqwest::Client,
         file: &serenity::all::Attachment,
     ) -> Result<Vec<u8>, crate::infrastructure::Error> {
-        Self::validate_attachment(file)?;
+        self.validate_attachment(file)?;
         let response = client
             .get(&file.url)
             .send()
             .await
             .map_err(|_| "添付ファイルを取得できませんでした。")?;
-        Self::read_attachment(response, file.size.into()).await
+        self.read_attachment(response, file.size.into()).await
     }
     pub(super) async fn read_attachment(
+        &self,
         mut response: reqwest::Response,
         expected: u64,
     ) -> Result<Vec<u8>, crate::infrastructure::Error> {
@@ -111,7 +114,7 @@ impl super::shop::ShopRepository {
             actor.user_id()
         );
         // 入力不正なら、読取りやディレクトリ作成前に拒否する。
-        values::content_file(&key, filename, 1)?;
+        domain::ContentFile::new(&key, filename, 1)?;
         if filename.len() > 255 {
             return Err(ValidationError::InvalidFileName.into());
         }
@@ -121,7 +124,7 @@ impl super::shop::ShopRepository {
         if bytes.len() as u64 > MAX_CONTENT_BYTES {
             return Err(ContentStorageError::TooLarge);
         }
-        let file = values::content_file(&key, filename, bytes.len() as u64)?;
+        let file = domain::ContentFile::new(&key, filename, bytes.len() as u64)?;
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]

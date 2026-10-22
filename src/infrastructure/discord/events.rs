@@ -1,5 +1,4 @@
 use super::Data;
-use super::not::NotRepository as DiscordNotRepository;
 use crate::{domain::LedgerReason, infrastructure::Error};
 use serenity::all::*;
 use std::time::{Instant, SystemTime};
@@ -225,8 +224,9 @@ impl Data {
         } else {
             None
         };
-        let Some(actor) = DiscordNotRepository::new(http)
-            .participant(guild, message.author.id)
+        let Some(actor) = self
+            .discord_not
+            .participant(http, guild, message.author.id)
             .await?
         else {
             return Ok(());
@@ -236,8 +236,9 @@ impl Data {
             .grant_reward(actor, LedgerReason::Message, &request, now)
             .await?;
         if let Some(original) = original
-            && let Some(actor) = DiscordNotRepository::new(http)
-                .participant(guild, original.author.id)
+            && let Some(actor) = self
+                .discord_not
+                .participant(http, guild, original.author.id)
                 .await?
         {
             self.sqlite_not
@@ -266,9 +267,7 @@ impl Data {
             .map(|(&(guild, user), state)| (guild, user, state.joined))
             .collect();
         for (guild, user, joined) in due {
-            let actor = DiscordNotRepository::new(http)
-                .participant(guild, user)
-                .await;
+            let actor = self.discord_not.participant(http, guild, user).await;
             let mut voice = self.voice.lock().await;
             let Some(state) = voice.get_mut(&(guild, user)).filter(|state| {
                 state.joined == joined
@@ -329,14 +328,12 @@ impl Data {
         {
             return Ok(());
         }
-        let Some(actor) = DiscordNotRepository::new(http)
-            .participant(guild, user)
-            .await?
-        else {
+        let Some(actor) = self.discord_not.participant(http, guild, user).await? else {
             return Ok(());
         };
-        let Some(author) = DiscordNotRepository::new(http)
-            .participant(guild, original.author.id)
+        let Some(author) = self
+            .discord_not
+            .participant(http, guild, original.author.id)
             .await?
         else {
             return Ok(());

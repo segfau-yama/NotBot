@@ -1,5 +1,5 @@
+use crate::domain;
 use crate::infrastructure::discord::test_support::actor;
-use crate::infrastructure::types as values;
 use serenity::json::{from_value, json, to_value};
 
 use super::*;
@@ -67,9 +67,12 @@ async fn 添付送信とサーバー選択とフォーム入力は公開前の�
         .unwrap();
     assert!(data.uploads.lock().await.is_empty());
     let expected = ListingDraft::new(
+        &data.discord_shop,
         "950".into(),
         actor(),
-        DiscordShopRepository::item_details("資料集".into(), "商品説明".into(), "500").unwrap(),
+        data.discord_shop
+            .create("資料集".into(), "商品説明".into(), "500")
+            .unwrap(),
         file.attachments[0].clone(),
     )
     .unwrap();
@@ -184,8 +187,8 @@ async fn 出品先の候補は本人の所属を確認し空のページでも�
     // 共用HTTPでは100・101に所属しているため、未所属候補は102以降。
     for id in 102..127 {
         data.shop_channels.insert(
-            values::guild_id(id).unwrap(),
-            values::channel_id(400).unwrap(),
+            domain::GuildId::new(id).unwrap(),
+            domain::ChannelId::new(400).unwrap(),
         );
     }
     let (_, rows) = data

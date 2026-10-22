@@ -1,4 +1,4 @@
-use crate::infrastructure::types as values;
+use crate::domain;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serenity::json::{from_value, json};
@@ -24,7 +24,7 @@ async fn 投稿と反応の報酬は対象者を確認し再配信や再起動�
     data.reward_message(&http, &post, now + Duration::from_secs(60))
         .await
         .unwrap();
-    let buyer = values::actor(actor().guild_id(), values::user_id(201).unwrap(), false);
+    let buyer = domain::Actor::new(actor().guild_id(), domain::UserId::new(201).unwrap(), false);
     assert_eq!(data.sqlite_not.get_balance(buyer).await.unwrap().get(), 5);
     value["id"] = json!("901");
     value["type"] = json!(19);

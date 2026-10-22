@@ -1,6 +1,6 @@
 # 実装と検証の進捗
 
-P00〜P13と通話報酬は実装・自動検証済み。Discordでの確認は未実施のため、該当工程は「実機確認待ち」のままとする。次の作業は[READMEの実機確認](../README.md)。
+P00〜P13と通話報酬は実装済み。過去の自動検証結果は下記に記録する。DESIGN.mdへの追従ではコンパイル・ビルドを確認し、続くDiscord Repositoryの共有では関連テスト37件を変更前後で確認した。Discordでの確認は未実施のため、該当工程は「実機確認待ち」のままとする。次の作業は[READMEの実機確認](../README.md)。
 
 仕様は [CONTENT.md](CONTENT.md)、[DATABASE.md](DATABASE.md)、[REPOSITORY.md](REPOSITORY.md)、配置は [ARCHITECTURE.md](ARCHITECTURE.md)を参照する。過去の設計変更と検証の詳細はGit履歴に残し、この文書には現在の状態を記録する。
 
@@ -28,6 +28,8 @@ P00〜P13と通話報酬は実装・自動検証済み。Discordでの確認は�
 | Repositoryの独立 | 相互参照の廃止・domain値の受け渡し・commands／eventsへの対話処理の移動 | Repositoryへの集約 | 完了 |
 | コマンドのDB呼出し | SQLite参照名の明示・商品変更と削除と購入一覧をコマンドから直接呼ぶ | Repositoryの独立 | 完了 |
 | domainの保護と入力変換 | 全フィールドの非公開化・入力変換をDiscord Repositoryへ集約 | コマンドのDB呼出し | 完了 |
+| DESIGN.mdへの追従 | domainの不変条件と計算・結果検証、両商品RepositoryのCRUD名 | 既存実装 | ビルド確認済み（テスト未実施） |
+| Discord Repositoryの共有 | Dataに両Repositoryを置き、認証・CRUD・添付処理をインスタンスで呼ぶ | DESIGN.mdへの追従 | 完了 |
 
 ## 工程ごとの確認点
 
@@ -93,3 +95,19 @@ domainの保護と入力変換（2026-10-22）：domainの全フィールドをp
 最終確認は全105件（既存102件と追加3件）が成功。fmt・check・clippy（警告をエラー扱い）・差分チェックも成功。domainに可変参照・検証・計算・インフラ依存がなく、commandsが共通変換関数やdomainの生成メソッドを直接呼ばないことを確認した。既存の取引・残高・出品・購入・返金・配送の検証を維持した。層・ファイル・依存・SQL・スキーマの追加変更はない。次はREADMEの実機確認。
 
 実Discordでのコマンド反映、DM・フォーム・添付配送、権限変更、投稿・リアクション・通話報酬、ロール復旧は未確認。実ストレージ障害・電源断も未確認。
+
+
+DESIGN.mdへの追従（2026-10-22）：DiscordとSQLiteのShopRepositoryを維持し、商品操作を `create`・`read`・`update`・`delete` に揃えた。Discord側が要求をdomainの値へ変換し、commandsがSQLite側へ渡す。SQLiteの `read` は商品がなければ `None` を返す。出品プレビューと確定時保存、所有者・商品版・再試行の照合は維持した。
+
+値の不変条件、金額計算、商品版の加算、購入確認の期限、購入・返金結果の整合性をdomainの生成メソッド・操作へ移した。インフラの単純な生成・計算ラッパーを削除し、ID・金額の文字列解析、SDK・DB行との変換、永続化は外側に残した。domainは標準ライブラリだけでコンパイルでき、SDK・ORM・Repositoryへの依存を持たない。既存テストは生成・取得APIへの追従のみ行い、配置と仕様名を維持した。
+
+独立サンプルのDB定義やrusqliteへの置換は行わず、SeaORM・既存スキーマ・INSERT履歴・取引境界を再利用した。実アプリの価格は既存の有料販売仕様とDB制約に従い正数のままとし、作成・更新・削除は保存したShopItem（ID・版を含む）を返す。設計書のサンプルにある無料価格やID・boolだけの戻り値への変更は含めない。
+
+`cargo build --locked`、`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` が成功。domain.rsの単体コンパイルも成功した。依頼に従いテストは実行していない。テストコードはコンパイルだけを確認し、実Discord接続、決済・配送・復旧の動作は未確認とする。次の確認は既存テストとREADMEの実機確認。
+
+
+Discord Repositoryの共有（2026-10-22）：bot.rsのDataへ `discord_not` を追加し、既存の `discord_shop` と並べて構築する。NotRepositoryから `&Http` の保持・借用ライフタイム・newを削除し、API取得が必要なメソッドだけが `&Http` を引数で受け取る。ShopRepositoryのCRUD・ID解析・添付検証と取得もインスタンスメソッドへ揃え、commands／eventsはDataから呼ぶ。下書きの生成でも同じShopRepositoryで添付を検証する。既存のHTTPクライアントをそのまま利用する。
+
+既存のDiscord関連37件を成功させた状態から変更し、変更後も同じ37件が成功した。認証・入力・添付・商品管理・購入と返金・報酬・通話・ロール復旧の仕様名と条件を維持し、テストの呼び出し先を新APIへ追従させた。実Discordでの確認は未実施。次はREADMEの実機確認。
+
+`cargo check --locked --all-targets`、`cargo clippy --locked --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` が成功。実装側にRepositoryの都度生成・型名からの操作呼び出しが残っていないことと、Repository間の参照がないことも確認した。

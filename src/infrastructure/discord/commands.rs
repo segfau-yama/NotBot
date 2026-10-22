@@ -4,9 +4,7 @@ use crate::{
         Actor, GuildId as DomainGuildId, ItemDetails, ItemId, ItemTarget, LedgerEntryId,
         PurchaseResult, ShopItem,
     },
-    infrastructure::discord::{
-        not::NotRepository as DiscordNotRepository, shop::ShopRepository as DiscordShopRepository,
-    },
+    infrastructure::discord::shop::ShopRepository as DiscordShopRepository,
     infrastructure::{Error, RepositoryError},
 };
 use serenity::all::*;
@@ -39,11 +37,18 @@ pub async fn balance(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     let guild_name = Data::guild_name(ctx.http(), actor.guild_id()).await?;
-    let balance = ctx.data().sqlite_not.get_balance(actor).await?;
+    let balance = data.sqlite_not.get_balance(actor).await?;
     ctx.send(
         poise::CreateReply::default()
             .embed(
@@ -71,11 +76,18 @@ pub async fn ranking(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     let guild_name = Data::guild_name(ctx.http(), actor.guild_id()).await?;
-    let ranking = ctx.data().sqlite_not.get_ranking(actor, 10).await?;
+    let ranking = data.sqlite_not.get_ranking(actor, 10).await?;
     let mut embed = CreateEmbed::new()
         .title("NOTランキング（上位10人）")
         .colour(Colour::BLURPLE)
@@ -111,14 +123,22 @@ pub async fn adjust(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     let guild_name = Data::guild_name(ctx.http(), actor.guild_id()).await?;
-    let target = DiscordNotRepository::new(ctx.http())
-        .adjustment_target(actor, user.id)
+    let target = data
+        .discord_not
+        .adjustment_target(ctx.http(), actor, user.id)
         .await?;
-    let amount = DiscordNotRepository::parse_amount(&amount)?;
+    let amount = data.discord_not.parse_amount(&amount)?;
     println!(
         "not adjustment_requested guild={} target={} amount={} request={}",
         actor.guild_id(),
@@ -126,8 +146,7 @@ pub async fn adjust(
         amount.get(),
         ctx.interaction.id
     );
-    let entry = ctx
-        .data()
+    let entry = data
         .sqlite_not
         .adjust_amount(actor, target, amount, &ctx.interaction.id.to_string())
         .await?;
@@ -165,12 +184,20 @@ pub async fn transfer(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     let guild_name = Data::guild_name(ctx.http(), actor.guild_id()).await?;
-    let target = DiscordNotRepository::new(ctx.http())
-        .member_target(actor, user.id)
+    let target = data
+        .discord_not
+        .member_target(ctx.http(), actor, user.id)
         .await?;
     println!(
         "not transfer_requested guild={} sender={} recipient={} amount={} request={}",
@@ -180,8 +207,7 @@ pub async fn transfer(
         amount,
         ctx.interaction.id
     );
-    let (sent, received) = ctx
-        .data()
+    let (sent, received) = data
         .sqlite_not
         .transfer(actor, target, amount, &ctx.interaction.id.to_string())
         .await?;
@@ -241,20 +267,28 @@ pub async fn add(
     #[description = "販売するファイル（1バイト〜20 MiB）"] file: Attachment,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
+    let data = ctx.data();
     if ctx.guild_id().is_some() {
         return Err("出品はBotとのDMから操作してください。".into());
     }
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
         .await?;
-    let (_, guild_name) = ctx.data().selling_channel(ctx.http(), actor).await?;
-    let details = DiscordShopRepository::item_details(title, description, &price)?;
+    let (_, guild_name) = data.selling_channel(ctx.http(), actor).await?;
+    let details = data.discord_shop.create(title, description, &price)?;
     // ここではプレビューを返す。DB保存は「出品する」を押したlisting_actionで行う。
-    let draft = ListingDraft::new(ctx.interaction.id.to_string(), actor, details, file)?;
+    let draft = ListingDraft::new(
+        &data.discord_shop,
+        ctx.interaction.id.to_string(),
+        actor,
+        details,
+        file,
+    )?;
     let reply = {
-        let mut uploads = ctx.data().uploads.lock().await;
+        let mut uploads = data.uploads.lock().await;
         uploads.remove(&actor.user_id().get());
-        ctx.data().remember_draft(draft, &guild_name).await
+        data.remember_draft(draft, &guild_name).await
     };
     ctx.send(reply).await?;
     Ok(())
@@ -271,10 +305,12 @@ pub async fn purchases(
     guild: String,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
         .await?;
-    let purchases = ctx.data().sqlite_shop.list_purchases(actor).await?;
+    let purchases = data.sqlite_shop.list_purchases(actor).await?;
     let (text, buttons) = Data::purchase_page(ctx.http(), actor, &purchases, 0).await?;
     ctx.send(
         poise::CreateReply::default()
@@ -309,13 +345,14 @@ pub async fn update(
     price: String,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
-        .await?;
-    let item = DiscordShopRepository::parse_item_id(&item)?;
-    let revision = DiscordShopRepository::parse_revision(&revision)?;
-    let details = DiscordShopRepository::item_details(title, description, &price)?;
     let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
+        .await?;
+    let (item, revision, details) =
+        data.discord_shop
+            .update(&item, &revision, title, description, &price)?;
     let saved = {
         let lock = data.publication_lock(item).await;
         let _publication = lock.lock().await;
@@ -353,12 +390,12 @@ pub async fn delete(
     #[description = "公開表示にある現在の版"] revision: String,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
-        .await?;
-    let item = DiscordShopRepository::parse_item_id(&item)?;
-    let revision = DiscordShopRepository::parse_revision(&revision)?;
     let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
+        .await?;
+    let (item, revision) = data.discord_shop.delete(&item, &revision)?;
     let saved = {
         let lock = data.publication_lock(item).await;
         let _publication = lock.lock().await;
@@ -393,16 +430,13 @@ pub async fn republish(
     #[description = "商品ID"] item: String,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
         .await?;
-    let (text, buttons) = ctx
-        .data()
-        .publication_status(
-            ctx.http(),
-            actor,
-            DiscordShopRepository::parse_item_id(&item)?,
-        )
+    let (text, buttons) = data
+        .publication_status(ctx.http(), actor, data.discord_shop.read(&item)?)
         .await?;
     ctx.send(
         poise::CreateReply::default()
@@ -423,18 +457,19 @@ pub async fn refund(
     #[description = "購入者の領収結果にある購入ID"] purchase: String,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), Some(&guild), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(ctx.http(), ctx.guild_id(), Some(&guild), ctx.author().id)
         .await?;
     ctx.say(
-        ctx.data()
-            .refund_purchase(
-                ctx.http(),
-                actor,
-                DiscordShopRepository::parse_purchase_id(&purchase)?,
-                &ctx.interaction.id.to_string(),
-            )
-            .await?,
+        data.refund_purchase(
+            ctx.http(),
+            actor,
+            data.discord_shop.parse_purchase_id(&purchase)?,
+            &ctx.interaction.id.to_string(),
+        )
+        .await?,
     )
     .await?;
     Ok(())
@@ -472,31 +507,36 @@ pub async fn add_role(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     if !actor.can_manage_not() {
         return Err(RepositoryError::PermissionDenied.into());
     }
-    let role: crate::domain::RoleId = DiscordShopRepository::parse_role_id(&role)?;
+    let role: crate::domain::RoleId = data.discord_shop.parse_role_id(&role)?;
     Data::check_role(
         ctx.http(),
         GuildId::new(actor.guild_id().get()),
         RoleId::new(role.get()),
     )
     .await?;
-    ctx.data().selling_channel(ctx.http(), actor).await?;
-    let item = ctx
-        .data()
+    data.selling_channel(ctx.http(), actor).await?;
+    let item = data
         .sqlite_shop
         .create_role(
             actor,
             role,
-            DiscordShopRepository::item_details(title, description, &price)?,
+            data.discord_shop.create(title, description, &price)?,
         )
         .await?;
-    let (text, buttons) = ctx
-        .data()
+    let (text, buttons) = data
         .publication_status(ctx.http(), actor, item.id())
         .await?;
     ctx.send(
@@ -517,14 +557,20 @@ pub async fn recover(
     guild: Option<String>,
 ) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
-    let actor = DiscordNotRepository::new(ctx.http())
-        .actor(ctx.guild_id(), guild.as_deref(), ctx.author().id)
+    let data = ctx.data();
+    let actor = data
+        .discord_not
+        .actor(
+            ctx.http(),
+            ctx.guild_id(),
+            guild.as_deref(),
+            ctx.author().id,
+        )
         .await?;
     let mut count = 0;
-    for purchase in ctx.data().sqlite_shop.list_purchases(actor).await? {
+    for purchase in data.sqlite_shop.list_purchases(actor).await? {
         if matches!(purchase.item().target(), ItemTarget::Role(_)) {
-            let (text, buttons) = ctx
-                .data()
+            let (text, buttons) = data
                 .deliver_role(ctx.http(), actor, purchase.buyer().id())
                 .await?;
             ctx.send(
@@ -555,6 +601,7 @@ impl Data {
         Ok(http.get_guild(GuildId::new(guild.get())).await?.name)
     }
     pub(super) async fn guild_choices(ctx: Context<'_>, query: &str) -> CreateAutocompleteResponse {
+        let data = ctx.data();
         let query = query.to_lowercase();
         // 名前の保管・参加/退出への追随はSerenityのキャッシュに任せる。
         let cache = &ctx.serenity_context().cache;
@@ -564,8 +611,10 @@ impl Data {
             .filter(|id| ctx.guild_id().is_none_or(|current| current == *id))
             .filter(|id| {
                 ctx.command().name != "add"
-                    || DiscordNotRepository::guild_id(*id)
-                        .is_ok_and(|id| ctx.data().shop_channels.contains_key(&id))
+                    || data
+                        .discord_not
+                        .guild_id(*id)
+                        .is_ok_and(|id| data.shop_channels.contains_key(&id))
             })
             .filter_map(|id| cache.guild(id).map(|guild| (id, guild.name.clone())))
             .filter(|(id, name)| {
@@ -579,7 +628,8 @@ impl Data {
         for (id, name) in guilds {
             match timeout_at(
                 deadline,
-                DiscordNotRepository::new(ctx.http()).authenticate(id, ctx.author().id),
+                data.discord_not
+                    .authenticate(ctx.http(), id, ctx.author().id),
             )
             .await
             {
@@ -763,8 +813,7 @@ impl Data {
             }) {
                 return Ok((message, channel));
             }
-            let (channel_id, message_id) =
-                DiscordShopRepository::publication_ids(channel, message)?;
+            let (channel_id, message_id) = self.discord_shop.publication_ids(channel, message)?;
             self.sqlite_shop
                 .record_publication(actor, &item, channel_id, message_id)
                 .await?;
@@ -819,10 +868,11 @@ impl Data {
         let parts: Vec<_> = component.data.custom_id.split(':').collect();
         match parts.as_slice() {
             ["content", "republish", guild, item] => {
-                let guild: crate::domain::GuildId = DiscordNotRepository::parse_guild_id(guild)?;
-                let item = DiscordShopRepository::parse_item_id(item)?;
-                let actor = DiscordNotRepository::new(http)
-                    .authenticate(GuildId::new(guild.get()), component.user.id)
+                let guild: crate::domain::GuildId = self.discord_not.parse_guild_id(guild)?;
+                let item = self.discord_shop.read(item)?;
+                let actor = self
+                    .discord_not
+                    .authenticate(http, GuildId::new(guild.get()), component.user.id)
                     .await?;
                 self.publication_status(http, actor, item).await
             }
@@ -845,8 +895,10 @@ impl Data {
                     return Ok(("出品をキャンセルしました。".into(), vec![]));
                 }
                 let result = async {
-                    let actor = DiscordNotRepository::new(http)
+                    let actor = self
+                        .discord_not
                         .authenticate(
+                            http,
                             GuildId::new(draft.actor.guild_id().get()),
                             component.user.id,
                         )
@@ -856,11 +908,10 @@ impl Data {
                     {
                         return Err(RepositoryError::PermissionDenied.into());
                     }
-                    let bytes = DiscordShopRepository::download_attachment(
-                        &self.download,
-                        &draft.attachment,
-                    )
-                    .await?;
+                    let bytes = self
+                        .discord_shop
+                        .download_attachment(&self.download, &draft.attachment)
+                        .await?;
                     let content = self.discord_shop.clone();
                     let id = draft.id.clone();
                     let filename = draft.attachment.filename.clone();
@@ -903,7 +954,8 @@ impl Data {
             return Ok(());
         }
         let valid = if message.attachments.len() == 1 {
-            DiscordShopRepository::validate_attachment(&message.attachments[0])
+            self.discord_shop
+                .validate_attachment(&message.attachments[0])
         } else {
             Err("出品するファイルは1つずつ送ってください。".into())
         };
@@ -967,7 +1019,11 @@ impl Data {
             let Ok(member) = http.get_member(guild_id, user).await else {
                 continue;
             };
-            if DiscordNotRepository::authenticated_actor(&guild, &member, user).is_ok() {
+            if self
+                .discord_not
+                .authenticated_actor(&guild, &member, user)
+                .is_ok()
+            {
                 options.push(CreateSelectMenuOption::new(
                     guild.name.chars().take(50).collect::<String>(),
                     id.to_string(),
@@ -1015,7 +1071,7 @@ impl Data {
         let mut uploads = self.uploads.lock().await;
         let upload = pending_upload(&uploads, user, id)?;
         let guild = selected
-            .map(DiscordNotRepository::parse_guild_id)
+            .map(|value| self.discord_not.parse_guild_id(value))
             .transpose()?
             .or(upload.guild)
             .filter(|guild| self.shop_channels.contains_key(guild))
@@ -1144,7 +1200,7 @@ impl Data {
         let ["content", "post", id, "form", guild] = parts.as_slice() else {
             return Err("出品フォームが不正です。".into());
         };
-        let guild: DomainGuildId = DiscordNotRepository::parse_guild_id(guild)?;
+        let guild: DomainGuildId = self.discord_not.parse_guild_id(guild)?;
         let upload = pending_upload(&*self.uploads.lock().await, modal.user.id, id)?.clone();
         if upload.guild != Some(guild) {
             return Err("出品先が変更されています。フォームを開き直してください。".into());
@@ -1167,13 +1223,21 @@ impl Data {
         let title = fields.get("title").ok_or("商品名がありません。")?;
         let description = fields.get("description").copied().unwrap_or("");
         let price = fields.get("price").ok_or("価格がありません。")?;
-        let actor = DiscordNotRepository::new(http)
-            .authenticate(GuildId::new(guild.get()), modal.user.id)
+        let actor = self
+            .discord_not
+            .authenticate(http, GuildId::new(guild.get()), modal.user.id)
             .await?;
         let (_, name) = self.selling_channel(http, actor).await?;
-        let details =
-            DiscordShopRepository::item_details(title.to_string(), description.into(), price)?;
-        let draft = ListingDraft::new(id.to_string(), actor, details, upload.attachment)?;
+        let details = self
+            .discord_shop
+            .create(title.to_string(), description.into(), price)?;
+        let draft = ListingDraft::new(
+            &self.discord_shop,
+            id.to_string(),
+            actor,
+            details,
+            upload.attachment,
+        )?;
         let mut uploads = self.uploads.lock().await;
         if pending_upload(&uploads, modal.user.id, id)?.guild != Some(guild) {
             return Err("出品先が変更されています。フォームを開き直してください。".into());
@@ -1243,8 +1307,7 @@ impl Data {
         }
         let balance = self.sqlite_not.get_balance(actor).await?;
         let price = quote.item().details().price().get();
-        let after =
-            DiscordNotRepository::balance_after_purchase(balance, quote.item().details().price())?;
+        let after = balance.after_purchase(quote.item().details().price())?;
         let guild = http.get_guild(GuildId::new(actor.guild_id().get())).await?;
         let message = CreateMessage::new()
             .embed(
@@ -1311,7 +1374,7 @@ impl Data {
         attachment_limit: u32,
     ) -> Result<(String, Vec<CreateActionRow>), Error> {
         let (guild, _) = id.split_once('-').ok_or("購入確認IDが不正です。")?;
-        let guild: crate::domain::GuildId = DiscordNotRepository::parse_guild_id(guild)?;
+        let guild: crate::domain::GuildId = self.discord_not.parse_guild_id(guild)?;
         let quote = {
             let mut confirmations = self.confirmations.lock().await;
             if confirmations.get(id).is_some_and(|quote| {
@@ -1324,8 +1387,9 @@ impl Data {
         if !yes && quote.is_some() {
             return Ok(("購入を取り消しました。課金していません。".into(), vec![]));
         }
-        let actor = DiscordNotRepository::new(http)
-            .authenticate(GuildId::new(guild.get()), user)
+        let actor = self
+            .discord_not
+            .authenticate(http, GuildId::new(guild.get()), user)
             .await?;
         if let Some(purchase) = self
             .sqlite_shop
@@ -1407,7 +1471,7 @@ impl Data {
                 guild,
                 target,
             ] => {
-                let guild: crate::domain::GuildId = DiscordNotRepository::parse_guild_id(guild)?;
+                let guild: crate::domain::GuildId = self.discord_not.parse_guild_id(guild)?;
                 if component
                     .guild_id
                     .is_some_and(|current| current.get() != guild.get())
@@ -1415,15 +1479,16 @@ impl Data {
                 {
                     return Err("元の商品と同じサーバーから操作してください。".into());
                 }
-                let actor = DiscordNotRepository::new(http)
-                    .authenticate(GuildId::new(guild.get()), component.user.id)
+                let actor = self
+                    .discord_not
+                    .authenticate(http, GuildId::new(guild.get()), component.user.id)
                     .await?;
                 match *kind {
                     "buy" => {
                         self.prepare_purchase(
                             http,
                             actor,
-                            DiscordShopRepository::parse_item_id(target)?,
+                            self.discord_shop.read(target)?,
                             format!("{guild}-{}", component.id),
                             now,
                         )
@@ -1433,7 +1498,7 @@ impl Data {
                         self.deliver_purchase(
                             http,
                             actor,
-                            DiscordShopRepository::parse_purchase_id(target)?,
+                            self.discord_shop.parse_purchase_id(target)?,
                         )
                         .await
                     }
@@ -1756,10 +1821,10 @@ impl Data {
     pub(super) async fn reconcile_roles(&self, http: &Http, guild: GuildId) -> Result<(), Error> {
         for purchase in self
             .sqlite_shop
-            .list_role_purchases(DiscordNotRepository::guild_id(guild)?)
+            .list_role_purchases(self.discord_not.guild_id(guild)?)
             .await?
         {
-            let actor = DiscordNotRepository::purchase_actor(&purchase);
+            let actor = purchase.buyer_actor();
             if self
                 .deliver_role(http, actor, purchase.buyer().id())
                 .await
@@ -1872,12 +1937,13 @@ pub(super) struct ListingDraft {
 
 impl ListingDraft {
     pub(super) fn new(
+        discord_shop: &DiscordShopRepository,
         id: String,
         actor: Actor,
         details: ItemDetails,
         attachment: Attachment,
     ) -> Result<Self, Error> {
-        DiscordShopRepository::validate_attachment(&attachment)?;
+        discord_shop.validate_attachment(&attachment)?;
         Ok(Self {
             id,
             actor,

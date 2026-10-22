@@ -10,6 +10,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 pub struct Data {
     pub(super) sqlite_not: crate::infrastructure::sqlite::not::NotRepository,
     pub(super) sqlite_shop: crate::infrastructure::sqlite::shop::ShopRepository,
+    pub(super) discord_not: super::not::NotRepository,
     pub(super) discord_shop: super::shop::ShopRepository,
     #[cfg(test)]
     pub(super) database: SqliteDatabaseAccess,
@@ -33,6 +34,7 @@ impl Data {
         Ok(Self {
             sqlite_not: crate::infrastructure::sqlite::not::NotRepository::new(database.clone()),
             sqlite_shop: crate::infrastructure::sqlite::shop::ShopRepository::new(database.clone()),
+            discord_not: super::not::NotRepository,
             discord_shop: super::shop::ShopRepository::new(directory),
             #[cfg(test)]
             database,

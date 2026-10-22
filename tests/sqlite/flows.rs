@@ -1,6 +1,6 @@
+use crate::domain;
 use crate::domain::StoredContent;
 use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
-use crate::infrastructure::types as values;
 use crate::infrastructure::{MoneyError, ValidationError};
 use std::{
     fs,
@@ -55,18 +55,18 @@ impl Drop for TestDatabase {
 }
 
 fn guild() -> GuildId {
-    values::guild_id(100).unwrap()
+    domain::GuildId::new(100).unwrap()
 }
 
 fn user() -> UserId {
-    values::user_id(200).unwrap()
+    domain::UserId::new(200).unwrap()
 }
 
 fn entry(amount: i64, key: &str) -> NewLedgerEntry {
-    values::new_ledger_entry(
+    domain::NewLedgerEntry::new(
         guild(),
         user(),
-        values::amount(amount),
+        domain::NotAmount::new(amount),
         LedgerReason::Adjustment,
         key,
     )
@@ -199,18 +199,18 @@ async fn 取引内の残高は未確定の増減を含みサーバーと利用�
     assert_eq!(inserted.event_key(), "first");
     write.append_entry(entry(-30, "second")).await.unwrap();
     assert_eq!(write.get_balance(guild(), user()).await.unwrap().get(), 70);
-    let other_guild = values::guild_id(101).unwrap();
-    let other_user = values::user_id(201).unwrap();
+    let other_guild = domain::GuildId::new(101).unwrap();
+    let other_user = domain::UserId::new(201).unwrap();
     for (guild, user, key) in [
         (other_guild, user(), "first"),
         (guild(), other_user, "other-user"),
     ] {
         write
             .append_entry(
-                values::new_ledger_entry(
+                domain::NewLedgerEntry::new(
                     guild,
                     user,
-                    values::amount(900),
+                    domain::NotAmount::new(900),
                     LedgerReason::Adjustment,
                     key,
                 )
@@ -275,11 +275,11 @@ async fn どの接続からも存在しない参照先を持つ履歴を登録�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let missing_sale = || {
-        values::new_ledger_entry(
+        domain::NewLedgerEntry::new(
             guild(),
             user(),
-            values::amount(1),
-            LedgerReason::Sale(values::ledger_entry_id(999).unwrap()),
+            domain::NotAmount::new(1),
+            LedgerReason::Sale(domain::LedgerEntryId::new(999).unwrap()),
             "missing-purchase",
         )
         .unwrap()
@@ -481,19 +481,19 @@ async fn 不正な履歴を制約で拒否し現在状態には最新の版だ�
     for (key, reason) in [
         (
             "purchase",
-            LedgerReason::Purchase(values::item_id(1).unwrap()),
+            LedgerReason::Purchase(domain::ItemId::new(1).unwrap()),
         ),
         (
             "sale",
-            LedgerReason::Sale(values::ledger_entry_id(1).unwrap()),
+            LedgerReason::Sale(domain::LedgerEntryId::new(1).unwrap()),
         ),
         (
             "refund",
-            LedgerReason::Refund(values::ledger_entry_id(1).unwrap()),
+            LedgerReason::Refund(domain::LedgerEntryId::new(1).unwrap()),
         ),
         (
             "sale-refund",
-            LedgerReason::SaleRefund(values::ledger_entry_id(2).unwrap()),
+            LedgerReason::SaleRefund(domain::LedgerEntryId::new(2).unwrap()),
         ),
     ] {
         assert_eq!(
@@ -574,11 +574,11 @@ async fn 未対応の保存形式や終了した接続では操作できない()
 }
 
 fn admin() -> Actor {
-    values::actor(guild(), user(), true)
+    domain::Actor::new(guild(), user(), true)
 }
 
 fn target(value: i64) -> Balance {
-    values::balance(value).unwrap()
+    domain::Balance::new(value).unwrap()
 }
 
 #[tokio::test]
@@ -650,7 +650,8 @@ async fn 通話報酬は一分一回かつ日本時間で一日300回まで付�
             .is_some()
     );
     assert_eq!(not.get_balance(buyer()).await.unwrap(), target(301));
-    let other_guild = values::actor(values::guild_id(101).unwrap(), buyer().user_id(), false);
+    let other_guild =
+        domain::Actor::new(domain::GuildId::new(101).unwrap(), buyer().user_id(), false);
     assert!(
         not.grant_voice_reward(other_guild, start)
             .await
@@ -782,7 +783,7 @@ async fn 報酬は日本時間の回数と間隔を守り再起動後も付与�
         .unwrap()
         .is_some()
     );
-    let other = values::actor(values::guild_id(101).unwrap(), user(), false);
+    let other = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), false);
     assert!(
         not.grant_reward(other, LedgerReason::Message, "message-0", start)
             .await
@@ -877,7 +878,7 @@ async fn 報酬は日本時間の回数と間隔を守り再起動後も付与�
         );
     }
     assert_eq!(not.get_balance(admin()).await.unwrap(), target(547));
-    let legacy = values::actor(values::guild_id(102).unwrap(), user(), false);
+    let legacy = domain::Actor::new(domain::GuildId::new(102).unwrap(), user(), false);
     let restored = not
         .grant_reward(legacy, LedgerReason::Message, "legacy-message", midnight)
         .await
@@ -985,34 +986,39 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotRepository::new(db.clone());
-    let sender = values::actor(guild(), user(), false);
-    let recipient = values::user_id(201).unwrap();
+    let sender = domain::Actor::new(guild(), user(), false);
+    let recipient = domain::UserId::new(201).unwrap();
     assert_eq!(
-        not.adjust_amount(sender, recipient, values::amount(0), "zero")
+        not.adjust_amount(sender, recipient, domain::NotAmount::new(0), "zero")
             .await,
         Err(RepositoryError::PermissionDenied)
     );
     let zero = not
-        .adjust_amount(admin(), recipient, values::amount(0), "zero")
+        .adjust_amount(admin(), recipient, domain::NotAmount::new(0), "zero")
         .await
         .unwrap();
     assert_eq!(zero.amount().get(), 0);
-    not.adjust_amount(admin(), recipient, values::amount(50), "seed-recipient")
-        .await
-        .unwrap();
+    not.adjust_amount(
+        admin(),
+        recipient,
+        domain::NotAmount::new(50),
+        "seed-recipient",
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(0), "zero")
+        not.adjust_amount(admin(), recipient, domain::NotAmount::new(0), "zero")
             .await
             .unwrap(),
         zero
     );
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(-51), "overdraft")
+        not.adjust_amount(admin(), recipient, domain::NotAmount::new(-51), "overdraft")
             .await,
         Err(RepositoryError::Money(MoneyError::NegativeBalance))
     );
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(-50), "fifty")
+        not.adjust_amount(admin(), recipient, domain::NotAmount::new(-50), "fifty")
             .await
             .unwrap()
             .amount()
@@ -1020,17 +1026,17 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
         -50
     );
     assert_eq!(
-        not.adjust_amount(admin(), user(), values::amount(-50), "fifty")
+        not.adjust_amount(admin(), user(), domain::NotAmount::new(-50), "fifty")
             .await,
         Err(RepositoryError::RequestConflict)
     );
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(-49), "fifty")
+        not.adjust_amount(admin(), recipient, domain::NotAmount::new(-49), "fifty")
             .await,
         Err(RepositoryError::RequestConflict)
     );
     assert_eq!(
-        not.adjust_amount(sender, recipient, values::amount(-50), "fifty")
+        not.adjust_amount(sender, recipient, domain::NotAmount::new(-50), "fifty")
             .await,
         Err(RepositoryError::PermissionDenied)
     );
@@ -1038,7 +1044,7 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
         .await
         .unwrap();
     assert_eq!(
-        not.adjust_amount(admin(), user(), values::amount(-100), "hundred")
+        not.adjust_amount(admin(), user(), domain::NotAmount::new(-100), "hundred")
             .await
             .unwrap()
             .amount()
@@ -1076,7 +1082,7 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
         }).await.unwrap();
         assert!(not.transfer(sender, recipient, 500, "retry").await.is_err());
         assert!(
-            not.adjust_amount(admin(), user(), values::amount(50), "retry-adjust")
+            not.adjust_amount(admin(), user(), domain::NotAmount::new(50), "retry-adjust")
                 .await
                 .is_err()
         );
@@ -1093,10 +1099,10 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
             .await
             .unwrap();
     }
-    not.adjust_amount(admin(), user(), values::amount(50), "retry-adjust")
+    not.adjust_amount(admin(), user(), domain::NotAmount::new(50), "retry-adjust")
         .await
         .unwrap();
-    not.adjust_amount(admin(), user(), values::amount(-50), "restore")
+    not.adjust_amount(admin(), user(), domain::NotAmount::new(-50), "restore")
         .await
         .unwrap();
     not.transfer(sender, recipient, 1000, "last").await.unwrap();
@@ -1120,23 +1126,33 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
     ));
     assert_eq!(not.get_balance(sender).await.unwrap(), target(500));
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(1), "adjust-overflow")
-            .await,
+        not.adjust_amount(
+            admin(),
+            recipient,
+            domain::NotAmount::new(1),
+            "adjust-overflow"
+        )
+        .await,
         Err(RepositoryError::Money(MoneyError::Overflow))
     );
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(i64::MIN), "adjust-min")
-            .await,
+        not.adjust_amount(
+            admin(),
+            recipient,
+            domain::NotAmount::new(i64::MIN),
+            "adjust-min"
+        )
+        .await,
         Err(RepositoryError::Money(MoneyError::NegativeBalance))
     );
     // 片側だけの不正履歴も、再試行で補完せず拒否する。
     let mut write = db.begin_write().await.unwrap();
     write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 user(),
-                values::amount(-100),
+                domain::NotAmount::new(-100),
                 LedgerReason::TipSent,
                 "transfer:broken:sent",
             )
@@ -1158,7 +1174,7 @@ async fn 調整と譲渡は同じ依頼を再反映せず失敗しても片側�
         first
     );
     assert_eq!(
-        not.adjust_amount(admin(), recipient, values::amount(0), "zero")
+        not.adjust_amount(admin(), recipient, domain::NotAmount::new(0), "zero")
             .await
             .unwrap(),
         zero
@@ -1174,7 +1190,7 @@ async fn 譲渡と購入や返金が競合しても残高不足と重複した�
     let first = NotRepository::new(first_db.clone());
     let second = NotRepository::new(second_db.clone());
     let (shop, item) = purchase_setup(&file, &first_db, 1200).await;
-    let recipient = values::user_id(202).unwrap();
+    let recipient = domain::UserId::new(202).unwrap();
     let (a, b) = tokio::join!(
         first.transfer(buyer(), recipient, 100, "same"),
         second.transfer(buyer(), recipient, 100, "same"),
@@ -1190,13 +1206,13 @@ async fn 譲渡と購入や返金が競合しても残高不足と重複した�
         first.adjust_amount(
             admin(),
             buyer().user_id(),
-            values::amount(-100),
+            domain::NotAmount::new(-100),
             "competing-adjustment"
         ),
         second.adjust_amount(
             admin(),
             buyer().user_id(),
-            values::amount(-100),
+            domain::NotAmount::new(-100),
             "competing-adjustment"
         ),
     );
@@ -1214,7 +1230,7 @@ async fn 譲渡と購入や返金が競合しても残高不足と重複した�
         .purchase(buyer(), &quote, purchase_time())
         .await
         .unwrap();
-    let seller = values::actor(guild(), user(), false);
+    let seller = domain::Actor::new(guild(), user(), false);
     let (sent, refund) = tokio::join!(
         second.transfer(seller, recipient, 500, "spent-sale"),
         shop.refund(admin(), purchase.buyer().id(), "competing-refund"),
@@ -1253,7 +1269,7 @@ async fn 残高とランキングは実行者のサーバーに所属する履�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotRepository::new(db.clone());
-    let viewer = values::actor(guild(), user(), false);
+    let viewer = domain::Actor::new(guild(), user(), false);
     assert_eq!(not.get_balance(viewer).await.unwrap(), target(0));
     assert!(not.get_ranking(viewer, 10).await.unwrap().is_empty());
     for (id, amount, key) in [
@@ -1262,11 +1278,16 @@ async fn 残高とランキングは実行者のサーバーに所属する履�
         (200, 200, "top"),
         (3, 0, "zero"),
     ] {
-        not.adjust_balance(admin(), values::user_id(id).unwrap(), target(amount), key)
-            .await
-            .unwrap();
+        not.adjust_balance(
+            admin(),
+            domain::UserId::new(id).unwrap(),
+            target(amount),
+            key,
+        )
+        .await
+        .unwrap();
     }
-    let other = values::actor(values::guild_id(101).unwrap(), user(), true);
+    let other = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), true);
     not.adjust_balance(other, user(), target(999), "top")
         .await
         .unwrap();
@@ -1339,8 +1360,13 @@ async fn 目標残高への調整は差額だけ記録し再起動後の再試�
         Err(RepositoryError::RequestConflict)
     );
     assert_eq!(
-        not.adjust_balance(admin(), values::user_id(201).unwrap(), target(100), "first")
-            .await,
+        not.adjust_balance(
+            admin(),
+            domain::UserId::new(201).unwrap(),
+            target(100),
+            "first"
+        )
+        .await,
         Err(RepositoryError::RequestConflict)
     );
     let raw = inspect(&file.path()).await;
@@ -1357,7 +1383,7 @@ async fn 権限不足や不正な調整と同じ依頼の内容変更は履歴�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let not = NotRepository::new(db.clone());
-    let ordinary = values::actor(guild(), user(), false);
+    let ordinary = domain::Actor::new(guild(), user(), false);
     assert_eq!(
         not.adjust_balance(ordinary, user(), target(100), "new")
             .await,
@@ -1383,10 +1409,10 @@ async fn 権限不足や不正な調整と同じ依頼の内容変更は履歴�
     let mut write = db.begin_write().await.unwrap();
     write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 user(),
-                values::amount(1),
+                domain::NotAmount::new(1),
                 LedgerReason::Message,
                 "adjust:collision",
             )
@@ -1555,7 +1581,7 @@ async fn ランキングや取引の照会では不正な保存値を有効な�
             .await,
         Err(RepositoryError::Database(DatabaseError::InvalidData))
     );
-    let other = values::actor(values::guild_id(101).unwrap(), user(), false);
+    let other = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), false);
     assert_eq!(
         not.get_ranking(other, 10).await,
         Err(RepositoryError::Database(DatabaseError::InvalidData))
@@ -1573,7 +1599,7 @@ async fn ランキングや取引の照会では不正な保存値を有効な�
 }
 
 fn details(name: &str, price: i64) -> ItemDetails {
-    values::item_details(name, "商品説明\n二行目", values::price(price).unwrap()).unwrap()
+    domain::ItemDetails::new(name, "商品説明\n二行目", domain::Price::new(price).unwrap()).unwrap()
 }
 
 fn saved_content(file: &TestDatabase, actor: Actor, request: &str) -> StoredContent {
@@ -1717,7 +1743,7 @@ async fn 商品を変更や削除して再起動しても識別情報と過去�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let shop = ShopRepository::new(db.clone());
-    let viewer = values::actor(guild(), values::user_id(201).unwrap(), false);
+    let viewer = domain::Actor::new(guild(), domain::UserId::new(201).unwrap(), false);
     let stored = saved_content(&file, admin(), "create");
     let original_details = details("資料集", 500);
     let original = shop
@@ -1726,17 +1752,17 @@ async fn 商品を変更や削除して再起動しても識別情報と過去�
         .unwrap();
     assert_eq!(original.revision(), 1);
     assert_eq!(original.seller_id(), user());
-    assert_eq!(shop.find(viewer, original.id()).await.unwrap(), original);
+    assert_eq!(
+        shop.read(viewer, original.id()).await.unwrap().as_ref(),
+        Some(&original)
+    );
     assert_eq!(
         shop.list(viewer).await.unwrap(),
         std::slice::from_ref(&original)
     );
-    let other = values::actor(values::guild_id(101).unwrap(), user(), true);
+    let other = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), true);
     assert!(shop.list(other).await.unwrap().is_empty());
-    assert_eq!(
-        shop.find(other, original.id()).await,
-        Err(RepositoryError::ItemNotFound)
-    );
+    assert_eq!(shop.read(other, original.id()).await, Ok(None));
     let changed = shop
         .update(admin(), original.id(), 1, details("新版", 700))
         .await
@@ -1745,7 +1771,10 @@ async fn 商品を変更や削除して再起動しても識別情報と過去�
     assert_eq!(changed.target(), original.target());
     assert_eq!(changed.guild_id(), original.guild_id());
     assert_eq!(changed.seller_id(), original.seller_id());
-    assert_eq!(shop.find(viewer, original.id()).await.unwrap(), changed);
+    assert_eq!(
+        shop.read(viewer, original.id()).await.unwrap().as_ref(),
+        Some(&changed)
+    );
     let deleted = shop.delete(admin(), original.id(), 2).await.unwrap();
     assert!(deleted.is_deleted());
     assert_eq!(deleted.revision(), 3);
@@ -1755,10 +1784,7 @@ async fn 商品を変更や削除して再起動しても識別情報と過去�
         deleted
     );
     assert!(shop.list(viewer).await.unwrap().is_empty());
-    assert_eq!(
-        shop.find(viewer, original.id()).await,
-        Err(RepositoryError::ItemNotFound)
-    );
+    assert_eq!(shop.read(viewer, original.id()).await, Ok(None));
     let mut read = db.begin_read().await.unwrap();
     assert_eq!(
         read.find_item(guild(), original.id()).await.unwrap(),
@@ -1822,8 +1848,8 @@ async fn 商品変更では出品者と版を照合し出品の再試行では�
         .create(admin(), details("original", 500), stored.clone())
         .await
         .unwrap();
-    let stranger = values::actor(guild(), values::user_id(201).unwrap(), true);
-    let other_guild = values::actor(values::guild_id(101).unwrap(), user(), true);
+    let stranger = domain::Actor::new(guild(), domain::UserId::new(201).unwrap(), true);
+    let other_guild = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), true);
     for actor in [stranger, other_guild] {
         assert_eq!(
             shop.create(actor, details("original", 500), stored.clone())
@@ -2014,7 +2040,7 @@ async fn 読取専用の取引や未保存のコンテンツ情報からは商�
     assert_eq!(
         read.append_content_item(
             admin(),
-            values::new_item(
+            domain::NewShopItem::new(
                 details("forbidden", 1),
                 ItemTarget::Content(stored.file().clone())
             )
@@ -2031,7 +2057,7 @@ async fn 読取専用の取引や未保存のコンテンツ情報からは商�
     raw.execute_unprepared("INSERT INTO shop_item (id, guild_id, seller_id, kind, target) VALUES (2, '100', '200', 'CONTENT', 'not-saved');
         INSERT INTO shop_item_revision (item_id, revision, name, price) VALUES (2, 1, 'broken', 1);").await.unwrap();
     assert_eq!(
-        shop.find(admin(), values::item_id(2).unwrap()).await,
+        shop.read(admin(), domain::ItemId::new(2).unwrap()).await,
         Err(RepositoryError::Database(DatabaseError::InvalidData))
     );
     assert_eq!(
@@ -2043,7 +2069,7 @@ async fn 読取専用の取引や未保存のコンテンツ情報からは商�
 }
 
 fn buyer() -> Actor {
-    values::actor(guild(), values::user_id(201).unwrap(), false)
+    domain::Actor::new(guild(), domain::UserId::new(201).unwrap(), false)
 }
 
 fn purchase_time() -> SystemTime {
@@ -2100,7 +2126,7 @@ async fn ロールの購入と返金は出品者の残高と売上履歴を変�
         let item = shop
             .create_role(
                 admin(),
-                values::role_id(500).unwrap(),
+                domain::RoleId::new(500).unwrap(),
                 details("会員権", 500),
             )
             .await
@@ -2211,7 +2237,7 @@ async fn 旧仕様の売上付きロール購入も再課金せず元の売上�
     let item = shop
         .create_role(
             admin(),
-            values::role_id(500).unwrap(),
+            domain::RoleId::new(500).unwrap(),
             details("旧仕様の会員権", 500),
         )
         .await
@@ -2223,10 +2249,10 @@ async fn 旧仕様の売上付きロール購入も再課金せず元の売上�
     let mut write = db.begin_write().await.unwrap();
     let purchase = write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 buyer().user_id(),
-                values::amount(-500),
+                domain::NotAmount::new(-500),
                 LedgerReason::Purchase(item.id()),
                 "content:legacy-role:buyer",
             )
@@ -2236,10 +2262,10 @@ async fn 旧仕様の売上付きロール購入も再課金せず元の売上�
         .unwrap();
     let sale = write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 admin().user_id(),
-                values::amount(500),
+                domain::NotAmount::new(500),
                 LedgerReason::Sale(purchase.id()),
                 "content:legacy-role:seller",
             )
@@ -2399,13 +2425,13 @@ async fn 販売していない商品や購入条件を満たさない商品に�
         shop.prepare_purchase(admin(), item.id(), "self", now).await,
         Err(RepositoryError::SelfPurchase)
     );
-    let other = values::actor(values::guild_id(101).unwrap(), buyer().user_id(), false);
+    let other = domain::Actor::new(domain::GuildId::new(101).unwrap(), buyer().user_id(), false);
     assert_eq!(
         shop.prepare_purchase(other, item.id(), "guild", now).await,
         Err(RepositoryError::ItemNotFound)
     );
     assert_eq!(
-        shop.prepare_purchase(buyer(), values::item_id(999).unwrap(), "missing", now)
+        shop.prepare_purchase(buyer(), domain::ItemId::new(999).unwrap(), "missing", now)
             .await,
         Err(RepositoryError::ItemNotFound)
     );
@@ -2433,7 +2459,7 @@ async fn 購入確認の期限と本人とサーバーを照合するまでは�
         .unwrap();
     let actors = [
         admin(),
-        values::actor(values::guild_id(101).unwrap(), buyer().user_id(), false),
+        domain::Actor::new(domain::GuildId::new(101).unwrap(), buyer().user_id(), false),
     ];
     for actor in actors {
         assert_eq!(
@@ -2657,7 +2683,7 @@ async fn 返金後でも同じ購入確認を別の購入者や商品や金額�
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, item) = purchase_setup(&file, &db, 1200).await;
     let not = NotRepository::new(db.clone());
-    let other = values::actor(guild(), values::user_id(202).unwrap(), false);
+    let other = domain::Actor::new(guild(), domain::UserId::new(202).unwrap(), false);
     not.adjust_balance(admin(), other.user_id(), target(1200), "seed-other")
         .await
         .unwrap();
@@ -2695,10 +2721,10 @@ async fn 返金後でも同じ購入確認を別の購入者や商品や金額�
     let mut write = db.begin_write().await.unwrap();
     write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 buyer().user_id(),
-                values::amount(500),
+                domain::NotAmount::new(500),
                 LedgerReason::Refund(result.buyer().id()),
                 "fixture:refund",
             )
@@ -2708,10 +2734,10 @@ async fn 返金後でも同じ購入確認を別の購入者や商品や金額�
         .unwrap();
     write
         .append_entry(
-            values::new_ledger_entry(
+            domain::NewLedgerEntry::new(
                 guild(),
                 user(),
-                values::amount(-500),
+                domain::NotAmount::new(-500),
                 LedgerReason::SaleRefund(result.seller().unwrap().id()),
                 "fixture:sale-refund",
             )
@@ -2960,7 +2986,7 @@ async fn 返金は管理者だけが元の購入と同じ依頼内容で実行�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
-    for actor in [buyer(), values::actor(guild(), user(), false)] {
+    for actor in [buyer(), domain::Actor::new(guild(), user(), false)] {
         assert_eq!(
             shop.refund(actor, paid.buyer().id(), "return").await,
             Err(RepositoryError::PermissionDenied)
@@ -2981,8 +3007,8 @@ async fn 返金は管理者だけが元の購入と同じ依頼内容で実行�
         );
     }
     for id in [
-        values::ledger_entry_id(1).unwrap(),
-        values::ledger_entry_id(999).unwrap(),
+        domain::LedgerEntryId::new(1).unwrap(),
+        domain::LedgerEntryId::new(999).unwrap(),
     ] {
         assert_eq!(
             shop.refund(admin(), id, "source").await,
@@ -2993,7 +3019,7 @@ async fn 返金は管理者だけが元の購入と同じ依頼内容で実行�
             Err(RepositoryError::PurchaseNotFound)
         );
     }
-    let operator = values::actor(guild(), values::user_id(300).unwrap(), true);
+    let operator = domain::Actor::new(guild(), domain::UserId::new(300).unwrap(), true);
     let returned = shop
         .refund(operator, paid.buyer().id(), "return")
         .await
@@ -3042,8 +3068,8 @@ async fn 同じ利用者と確認番号でも購入一覧と返金はサーバ�
     let file = TestDatabase::new();
     let db = SqliteDatabaseAccess::open(file.path()).await.unwrap();
     let (shop, paid) = completed_purchase(&file, &db).await;
-    let other_admin = values::actor(values::guild_id(101).unwrap(), user(), true);
-    let other_buyer = values::actor(other_admin.guild_id(), buyer().user_id(), false);
+    let other_admin = domain::Actor::new(domain::GuildId::new(101).unwrap(), user(), true);
+    let other_buyer = domain::Actor::new(other_admin.guild_id(), buyer().user_id(), false);
     NotRepository::new(db.clone())
         .adjust_balance(other_admin, other_buyer.user_id(), target(1000), "seed")
         .await
@@ -3088,7 +3114,7 @@ async fn 同じ利用者と確認番号でも購入一覧と返金はサーバ�
             .await,
         Err(RepositoryError::PurchaseNotFound)
     );
-    let missing = values::actor(values::guild_id(102).unwrap(), buyer().user_id(), false);
+    let missing = domain::Actor::new(domain::GuildId::new(102).unwrap(), buyer().user_id(), false);
     assert_eq!(
         shop.find_purchase_by_confirmation(missing, "paid")
             .await
@@ -3179,7 +3205,7 @@ async fn 同時の返金や新しい購入との競合でも同じ購入を二�
             );
         } else {
             // 返金と、別ユーザーの購入を同じ出品者残高に対して競合させる。
-            let other = values::actor(guild(), values::user_id(202).unwrap(), false);
+            let other = domain::Actor::new(guild(), domain::UserId::new(202).unwrap(), false);
             NotRepository::new(first_db.clone())
                 .adjust_balance(admin(), other.user_id(), target(500), "seed-other")
                 .await
@@ -3261,10 +3287,10 @@ async fn 売買や返金の履歴が不整合なら結果復元と取得と返�
         let mut write = db.begin_write().await.unwrap();
         let purchase = write
             .append_entry(
-                values::new_ledger_entry(
+                domain::NewLedgerEntry::new(
                     guild(),
                     buyer().user_id(),
-                    values::amount(-500),
+                    domain::NotAmount::new(-500),
                     LedgerReason::Purchase(item.id()),
                     "content:broken:buyer",
                 )
@@ -3275,14 +3301,14 @@ async fn 売買や返金の履歴が不整合なら結果復元と取得と返�
         if mode != 0 {
             let seller = write
                 .append_entry(
-                    values::new_ledger_entry(
+                    domain::NewLedgerEntry::new(
                         guild(),
                         if mode == 2 {
-                            values::user_id(202).unwrap()
+                            domain::UserId::new(202).unwrap()
                         } else {
                             user()
                         },
-                        values::amount(if mode == 1 { 600 } else { 500 }),
+                        domain::NotAmount::new(if mode == 1 { 600 } else { 500 }),
                         LedgerReason::Sale(purchase.id()),
                         "content:broken:seller",
                     )
@@ -3293,10 +3319,10 @@ async fn 売買や返金の履歴が不整合なら結果復元と取得と返�
             if mode >= 3 {
                 write
                     .append_entry(
-                        values::new_ledger_entry(
+                        domain::NewLedgerEntry::new(
                             guild(),
                             buyer().user_id(),
-                            values::amount(if mode == 4 { 499 } else { 500 }),
+                            domain::NotAmount::new(if mode == 4 { 499 } else { 500 }),
                             LedgerReason::Refund(purchase.id()),
                             "refund:broken:buyer",
                         )
@@ -3307,10 +3333,10 @@ async fn 売買や返金の履歴が不整合なら結果復元と取得と返�
                 if mode == 4 {
                     write
                         .append_entry(
-                            values::new_ledger_entry(
+                            domain::NewLedgerEntry::new(
                                 guild(),
                                 user(),
-                                values::amount(-500),
+                                domain::NotAmount::new(-500),
                                 LedgerReason::SaleRefund(seller.id()),
                                 "refund:broken:seller",
                             )

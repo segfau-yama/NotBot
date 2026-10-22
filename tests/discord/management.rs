@@ -1,6 +1,5 @@
-use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
+use crate::domain;
 use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
-use crate::infrastructure::types as values;
 use std::{fs, sync::atomic::Ordering, time::SystemTime};
 
 use serenity::{
@@ -25,19 +24,19 @@ async fn 商品管理は最新の公開投稿を編集し公開に失敗して�
     write
         .append_publication(
             &item,
-            values::channel_id(400).unwrap(),
-            values::message_id(901).unwrap(),
+            domain::ChannelId::new(400).unwrap(),
+            domain::MessageId::new(901).unwrap(),
         )
         .await
         .unwrap();
     write.commit().await.unwrap();
-    let buyer = values::actor(actor().guild_id(), values::user_id(201).unwrap(), false);
-    let admin = values::actor(actor().guild_id(), actor().user_id(), true);
+    let buyer = domain::Actor::new(actor().guild_id(), domain::UserId::new(201).unwrap(), false);
+    let admin = domain::Actor::new(actor().guild_id(), actor().user_id(), true);
     data.sqlite_not
         .adjust_balance(
             admin,
             buyer.user_id(),
-            values::balance(1200).unwrap(),
+            domain::Balance::new(1200).unwrap(),
             "fund",
         )
         .await
@@ -47,28 +46,37 @@ async fn 商品管理は最新の公開投稿を編集し公開に失敗して�
         .prepare_purchase(buyer, item.id(), "old-price", SystemTime::now())
         .await
         .unwrap();
-    let details =
-        DiscordShopRepository::item_details("新しい資料".into(), "変更後".into(), "600").unwrap();
+    let details = data
+        .discord_shop
+        .create("新しい資料".into(), "変更後".into(), "600")
+        .unwrap();
     assert!(
         data.sqlite_shop
             .update(buyer, item.id(), 1, details.clone())
             .await
             .is_err()
     );
-    let other_guild = values::actor(values::guild_id(101).unwrap(), actor().user_id(), false);
+    let other_guild =
+        domain::Actor::new(domain::GuildId::new(101).unwrap(), actor().user_id(), false);
     assert!(
         data.sqlite_shop
             .delete(other_guild, item.id(), 1)
             .await
             .is_err()
     );
-    let different = values::item_details("別の変更", "", values::price(700).unwrap()).unwrap();
+    let different =
+        domain::ItemDetails::new("別の変更", "", domain::Price::new(700).unwrap()).unwrap();
     let (a, b) = tokio::join!(
         data.sqlite_shop.update(actor(), item.id(), 1, details),
         data.sqlite_shop.update(actor(), item.id(), 1, different),
     );
     assert_ne!(a.is_ok(), b.is_ok());
-    let latest = data.sqlite_shop.find(actor(), item.id()).await.unwrap();
+    let latest = data
+        .sqlite_shop
+        .read(actor(), item.id())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(latest.revision(), 2);
     data.publication_status(&http, actor(), item.id())
         .await
@@ -163,19 +171,21 @@ async fn 売買と商品管理を経てバックアップを復元しても無�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    let buyer = DiscordNotRepository::new(&http)
-        .authenticate(GuildId::new(100), UserId::new(201))
+    let buyer = data
+        .discord_not
+        .authenticate(&http, GuildId::new(100), UserId::new(201))
         .await
         .unwrap();
-    let admin = DiscordNotRepository::new(&http)
-        .authenticate(GuildId::new(100), UserId::new(999))
+    let admin = data
+        .discord_not
+        .authenticate(&http, GuildId::new(100), UserId::new(999))
         .await
         .unwrap();
     data.sqlite_not
         .adjust_balance(
             admin,
             buyer.user_id(),
-            values::balance(1200).unwrap(),
+            domain::Balance::new(1200).unwrap(),
             "supply",
         )
         .await
@@ -224,7 +234,9 @@ async fn 売買と商品管理を経てバックアップを復元しても無�
             actor(),
             item.id(),
             1,
-            DiscordShopRepository::item_details("改訂版".into(), "".into(), "800").unwrap(),
+            data.discord_shop
+                .create("改訂版".into(), "".into(), "800")
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -260,7 +272,14 @@ async fn 売買と商品管理を経てバックアップを復元しても無�
         restored.sqlite_not.get_balance(buyer).await.unwrap().get(),
         700
     );
-    assert!(restored.sqlite_shop.find(actor(), item.id()).await.is_err());
+    assert!(
+        restored
+            .sqlite_shop
+            .read(actor(), item.id())
+            .await
+            .unwrap()
+            .is_none()
+    );
     restored
         .purchase_action(&http, &resend, SystemTime::now())
         .await
@@ -356,9 +375,10 @@ async fn 売買と商品管理を経てバックアップを復元しても無�
 
 #[test]
 fn 商品版の入力は正の整数に限り不正値を版番号として説明する() {
-    assert_eq!(DiscordShopRepository::parse_revision("001").unwrap(), 1);
+    let discord_shop = DiscordShopRepository::new(Default::default());
+    assert_eq!(discord_shop.parse_revision("001").unwrap(), 1);
     for value in ["", "0", "-1", "+1", "１", "9223372036854775808"] {
-        let error = DiscordShopRepository::parse_revision(value).unwrap_err();
+        let error = discord_shop.parse_revision(value).unwrap_err();
         assert!(error.to_string().contains("商品版"), "{value}: {error}");
     }
 }

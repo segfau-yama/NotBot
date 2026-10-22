@@ -1,6 +1,6 @@
+use crate::domain;
 use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
 use crate::infrastructure::discord::test_support::actor;
-use crate::infrastructure::types as values;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -23,10 +23,14 @@ fn attachment() -> Attachment {
 }
 
 fn draft(id: &str) -> ListingDraft {
+    let discord_shop = DiscordShopRepository::new(Default::default());
     ListingDraft::new(
+        &discord_shop,
         id.into(),
         actor(),
-        DiscordShopRepository::item_details("資料集".into(), "商品説明".into(), "500").unwrap(),
+        discord_shop
+            .create("資料集".into(), "商品説明".into(), "500")
+            .unwrap(),
         attachment(),
     )
     .unwrap()
@@ -63,6 +67,7 @@ fn 出品コマンドは本人との会話で商品情報と価格とサーバ�
 
 #[test]
 fn 商品と購入とロールの識別子には正の十進整数だけを指定できる() {
+    let discord_shop = DiscordShopRepository::new(Default::default());
     for input in [
         "",
         "0",
@@ -74,37 +79,22 @@ fn 商品と購入とロールの識別子には正の十進整数だけを指�
         "１２",
         "18446744073709551616",
     ] {
-        assert!(
-            DiscordShopRepository::parse_item_id(input).is_err(),
-            "{input}"
-        );
-        assert!(
-            DiscordShopRepository::parse_purchase_id(input).is_err(),
-            "{input}"
-        );
-        assert!(
-            DiscordShopRepository::parse_role_id(input).is_err(),
-            "{input}"
-        );
+        assert!(discord_shop.read(input).is_err(), "{input}");
+        assert!(discord_shop.parse_purchase_id(input).is_err(), "{input}");
+        assert!(discord_shop.parse_role_id(input).is_err(), "{input}");
     }
-    assert_eq!(
-        DiscordShopRepository::parse_item_id("001").unwrap().get(),
-        1
+    assert_eq!(discord_shop.read("001").unwrap().get(), 1);
+    assert_eq!(discord_shop.parse_purchase_id("001").unwrap().get(), 1);
+    assert_eq!(discord_shop.parse_role_id("001").unwrap().get(), 1);
+    assert!(discord_shop.read("9223372036854775808").is_err());
+    assert!(
+        discord_shop
+            .parse_purchase_id("9223372036854775808")
+            .is_err()
     );
     assert_eq!(
-        DiscordShopRepository::parse_purchase_id("001")
-            .unwrap()
-            .get(),
-        1
-    );
-    assert_eq!(
-        DiscordShopRepository::parse_role_id("001").unwrap().get(),
-        1
-    );
-    assert!(DiscordShopRepository::parse_item_id("9223372036854775808").is_err());
-    assert!(DiscordShopRepository::parse_purchase_id("9223372036854775808").is_err());
-    assert_eq!(
-        DiscordShopRepository::parse_role_id("18446744073709551615")
+        discord_shop
+            .parse_role_id("18446744073709551615")
             .unwrap()
             .get(),
         u64::MAX
@@ -113,9 +103,12 @@ fn 商品と購入とロールの識別子には正の十進整数だけを指�
 
 #[test]
 fn 出品価格には正の整数だけを指定できる() {
+    let discord_shop = DiscordShopRepository::new(Default::default());
     for price in ["0", "-1", "1.5", "9223372036854775808", " 500"] {
         assert!(
-            DiscordShopRepository::item_details("資料".into(), "".into(), price,).is_err(),
+            discord_shop
+                .create("資料".into(), "".into(), price,)
+                .is_err(),
             "{price}"
         );
     }
@@ -123,7 +116,12 @@ fn 出品価格には正の整数だけを指定できる() {
 
 #[test]
 fn 出品名は絵文字も文字数制限の対象になる() {
-    assert!(DiscordShopRepository::item_details("😀".repeat(129), "".into(), "500",).is_err());
+    let discord_shop = DiscordShopRepository::new(Default::default());
+    assert!(
+        discord_shop
+            .create("😀".repeat(129), "".into(), "500",)
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -188,6 +186,7 @@ async fn 期限切れの下書きは確定できない() {
 
 #[test]
 fn 添付には外部サイトや危険なファイル名や配送できないサイズを許可しない() {
+    let discord_shop = DiscordShopRepository::new(Default::default());
     for url in [
         "http://cdn.discordapp.com/attachments/1/2/a",
         "https://example.com/file",
@@ -197,17 +196,17 @@ fn 添付には外部サイトや危険なファイル名や配送できない�
     ] {
         let mut file = attachment();
         file.url = url.into();
-        assert!(DiscordShopRepository::validate_attachment(&file).is_err());
+        assert!(discord_shop.validate_attachment(&file).is_err());
     }
     for size in [0, (MAX_CONTENT_BYTES + 1) as u32] {
         let mut file = attachment();
         file.size = size;
-        assert!(DiscordShopRepository::validate_attachment(&file).is_err());
+        assert!(discord_shop.validate_attachment(&file).is_err());
     }
     let mut file = attachment();
     file.filename = "../secret".into();
-    assert!(DiscordShopRepository::validate_attachment(&file).is_err());
-    assert!(DiscordShopRepository::validate_attachment(&attachment()).is_ok());
+    assert!(discord_shop.validate_attachment(&file).is_err());
+    assert!(discord_shop.validate_attachment(&attachment()).is_ok());
 }
 
 #[tokio::test]
@@ -283,7 +282,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
         .unwrap();
     assert_eq!((record.0, record.1.get(), record.2.get()), (1, 400, 900));
     assert!(
-        read.find_publication(values::guild_id(101).unwrap(), item.id())
+        read.find_publication(domain::GuildId::new(101).unwrap(), item.id())
             .await
             .unwrap()
             .is_none()
@@ -299,7 +298,7 @@ async fn 商品を公開できるのは出品者本人で正しい販売先と�
     let mock = MockDiscord::new();
     let http = mock.http();
     let item = saved_item(&data).await;
-    let stranger = values::actor(actor().guild_id(), values::user_id(201).unwrap(), false);
+    let stranger = domain::Actor::new(actor().guild_id(), domain::UserId::new(201).unwrap(), false);
     assert!(
         data.publication_status(&http, stranger, item.id())
             .await
@@ -374,6 +373,7 @@ async fn 公開記録の保存に失敗しても商品を増やさず同じ商�
 
 #[tokio::test]
 async fn 添付は実サイズを確認し上限超過と別の取得先への転送を拒否する() {
+    let discord_shop = DiscordShopRepository::new(Default::default());
     for (status, body, expected) in [
         (200, vec![b'x'; 3], 3),
         (200, vec![b'x'; 3], 2),
@@ -407,7 +407,7 @@ async fn 添付は実サイズを確認し上限超過と別の取得先への�
             .await
             .unwrap();
         assert_eq!(response.status().as_u16(), status);
-        let result = DiscordShopRepository::read_attachment(response, expected).await;
+        let result = discord_shop.read_attachment(response, expected).await;
         if status == 200 && expected == 3 {
             assert_eq!(result.unwrap(), b"xxx");
         } else {
