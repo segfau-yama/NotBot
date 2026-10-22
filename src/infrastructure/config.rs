@@ -1,3 +1,4 @@
+use crate::infrastructure::types as values;
 use std::{
     collections::HashMap,
     env::{self, VarError},
@@ -42,13 +43,9 @@ impl Config {
                 let Some((guild_id, channel_id)) = mapping.split_once('=') else {
                     return Err(ConfigError::Invalid("SHOP_CHANNELS"));
                 };
-                let guild_id = guild_id
-                    .trim()
-                    .parse()
+                let guild_id = values::parse_guild_id(guild_id.trim())
                     .map_err(|_| ConfigError::Invalid("SHOP_CHANNELS"))?;
-                let channel_id = channel_id
-                    .trim()
-                    .parse()
+                let channel_id = values::parse_channel_id(channel_id.trim())
                     .map_err(|_| ConfigError::Invalid("SHOP_CHANNELS"))?;
                 if shop_channels.insert(guild_id, channel_id).is_some() {
                     return Err(ConfigError::Invalid("SHOP_CHANNELS"));

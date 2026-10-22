@@ -1,3 +1,5 @@
+use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
+use crate::infrastructure::types as values;
 use std::sync::atomic::Ordering;
 
 use serenity::{
@@ -5,8 +7,7 @@ use serenity::{
     json::{json, to_value},
 };
 
-use super::*;
-use crate::{domain::Balance, infrastructure::discord::test_support::*};
+use crate::infrastructure::discord::test_support::*;
 
 #[tokio::test]
 async fn 残高調整は管理者だけが行え所属するメンバー間では定額を譲渡できる() {
@@ -14,56 +15,66 @@ async fn 残高調整は管理者だけが行え所属するメンバー間で�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    let sender = services::authenticate(&http, GuildId::new(100), UserId::new(200))
+    let sender = DiscordNotRepository::new(&http)
+        .authenticate(GuildId::new(100), UserId::new(200))
         .await
         .unwrap();
-    let admin = services::authenticate(&http, GuildId::new(100), UserId::new(999))
+    let admin = DiscordNotRepository::new(&http)
+        .authenticate(GuildId::new(100), UserId::new(999))
         .await
         .unwrap();
     assert!(
-        services::adjustment_target(&http, sender, UserId::new(201))
+        DiscordNotRepository::new(&http)
+            .adjustment_target(sender, UserId::new(201))
             .await
             .is_err()
     );
-    let recipient = services::member_target(&http, sender, UserId::new(201))
+    let recipient = DiscordNotRepository::new(&http)
+        .member_target(sender, UserId::new(201))
         .await
         .unwrap();
-    data.not
+    data.sqlite_not
         .adjust_balance(
             admin,
             sender.user_id(),
-            Balance::try_from(1200).unwrap(),
+            values::balance(1200).unwrap(),
             "seed",
         )
         .await
         .unwrap();
-    data.not
+    data.sqlite_not
         .transfer(sender, recipient, 500, "interaction")
         .await
         .unwrap();
-    let target = services::adjustment_target(&http, admin, UserId::new(201))
+    let target = DiscordNotRepository::new(&http)
+        .adjustment_target(admin, UserId::new(201))
         .await
         .unwrap();
     let penalty = data
-        .not
+        .sqlite_not
         .adjust_amount(
             admin,
             target,
-            crate::domain::NotAmount::new(-100),
+            values::amount(-100),
             "adjustment-interaction",
         )
         .await
         .unwrap();
     assert_eq!(penalty.amount().get(), -100);
-    assert_eq!(data.not.get_balance(sender).await.unwrap().get(), 700);
+    assert_eq!(
+        data.sqlite_not.get_balance(sender).await.unwrap().get(),
+        700
+    );
     mock.deny_member.store(true, Ordering::Relaxed);
     assert!(
-        services::authenticate(&http, GuildId::new(100), UserId::new(200))
+        DiscordNotRepository::new(&http)
+            .authenticate(GuildId::new(100), UserId::new(200))
             .await
             .is_err()
     );
     assert!(
-        services::member_target(&http, sender, UserId::new(201))
+        DiscordNotRepository::new(&http)
+            .member_target(sender, UserId::new(201))
             .await
             .is_err()
     );

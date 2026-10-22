@@ -1,5 +1,5 @@
-use crate::infrastructure::discord::services;
 use crate::infrastructure::discord::test_support::actor;
+use crate::infrastructure::types as values;
 use serenity::json::{from_value, json, to_value};
 
 use super::*;
@@ -36,9 +36,10 @@ async fn 添付送信とサーバー選択とフォーム入力は公開前の�
     let mock = MockDiscord::new();
     let http = mock.http();
     let file = upload(950);
-    receive_upload(&http, &data, &file).await.unwrap();
+    data.receive_upload(&http, &file).await.unwrap();
     assert!(mock.posts()[0].contains("このファイルを出品する"));
-    let (_, rows) = selling_servers(&http, &data, file.author.id, "950", 0)
+    let (_, rows) = data
+        .selling_servers(&http, file.author.id, "950", 0)
         .await
         .unwrap();
     assert_eq!(
@@ -51,7 +52,7 @@ async fn 添付送信とサーバー選択とフォーム入力は公開前の�
         values: vec!["100".into()],
     };
     let count = mock.requests.lock().unwrap().len();
-    posting_component(&http, &data, &select).await.unwrap();
+    data.posting_component(&http, &select).await.unwrap();
     {
         let requests = mock.requests.lock().unwrap();
         assert_eq!(requests.len(), count + 1);
@@ -61,16 +62,14 @@ async fn 添付送信とサーバー選択とフォーム入力は公開前の�
         );
     }
 
-    listing_modal(&http, &data, &modal(950, 100, 200, "500"))
+    data.listing_modal(&http, &modal(950, 100, 200, "500"))
         .await
         .unwrap();
     assert!(data.uploads.lock().await.is_empty());
     let expected = ListingDraft::new(
         "950".into(),
         actor(),
-        "資料集".into(),
-        "商品説明".into(),
-        "500",
+        DiscordShopRepository::item_details("資料集".into(), "商品説明".into(), "500").unwrap(),
         file.attachments[0].clone(),
     )
     .unwrap();
@@ -92,9 +91,9 @@ async fn 添付送信とサーバー選択とフォーム入力は公開前の�
         .unwrap()
     );
     drop(drafts);
-    assert!(!data.content_dir.exists());
-    assert!(data.shop.list(actor()).await.unwrap().is_empty());
-    services::listing_action(&http, &data, &component("content:draft:950:cancel", 200))
+    assert!(!data.discord_shop.directory.exists());
+    assert!(data.sqlite_shop.list(actor()).await.unwrap().is_empty());
+    data.listing_action(&http, &component("content:draft:950:cancel", 200))
         .await
         .unwrap();
     assert!(data.drafts.lock().await.is_empty());
@@ -107,64 +106,66 @@ async fn 別人や取消済みや期限切れや再起動前のフォームか�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    receive_upload(&http, &data, &upload(951)).await.unwrap();
+    data.receive_upload(&http, &upload(951)).await.unwrap();
     assert!(
-        listing_form(&data, UserId::new(201), "951", Some("100"))
+        data.listing_form(UserId::new(201), "951", Some("100"))
             .await
             .is_err()
     );
-    let _ = listing_form(&data, UserId::new(200), "951", Some("100"))
+    let _ = data
+        .listing_form(UserId::new(200), "951", Some("100"))
         .await
         .unwrap();
     assert!(
-        listing_preview(&http, &data, &modal(951, 100, 201, "500"))
+        data.listing_preview(&http, &modal(951, 100, 201, "500"))
             .await
             .is_err()
     );
     assert!(
-        listing_preview(&http, &data, &modal(951, 100, 200, "0"))
+        data.listing_preview(&http, &modal(951, 100, 200, "0"))
             .await
             .is_err()
     );
     assert!(
-        listing_preview(&http, &data, &modal(951, 101, 200, "500"))
+        data.listing_preview(&http, &modal(951, 101, 200, "500"))
             .await
             .is_err()
     );
-    receive_upload(&http, &data, &upload(952)).await.unwrap();
+    data.receive_upload(&http, &upload(952)).await.unwrap();
     assert!(
-        listing_preview(&http, &data, &modal(951, 100, 200, "500"))
+        data.listing_preview(&http, &modal(951, 100, 200, "500"))
             .await
             .is_err()
     );
-    posting_action(&http, &data, &component("content:post:952:cancel", 200))
+    data.posting_action(&http, &component("content:post:952:cancel", 200))
         .await
         .unwrap();
     assert!(
-        listing_form(&data, UserId::new(200), "952", Some("100"))
+        data.listing_form(UserId::new(200), "952", Some("100"))
             .await
             .is_err()
     );
-    receive_upload(&http, &data, &upload(953)).await.unwrap();
+    data.receive_upload(&http, &upload(953)).await.unwrap();
     data.uploads.lock().await.get_mut(&200).unwrap().expires_at = Instant::now();
     assert!(
-        listing_form(&data, UserId::new(200), "953", Some("100"))
+        data.listing_form(UserId::new(200), "953", Some("100"))
             .await
             .is_err()
     );
-    receive_upload(&http, &data, &upload(954)).await.unwrap();
-    let _ = listing_form(&data, UserId::new(200), "954", Some("100"))
+    data.receive_upload(&http, &upload(954)).await.unwrap();
+    let _ = data
+        .listing_form(UserId::new(200), "954", Some("100"))
         .await
         .unwrap();
     data.database.close().await.unwrap();
     let data = setup(&directory).await;
     assert!(
-        listing_preview(&http, &data, &modal(954, 100, 200, "500"))
+        data.listing_preview(&http, &modal(954, 100, 200, "500"))
             .await
             .is_err()
     );
-    assert!(!data.content_dir.exists());
-    assert!(data.shop.list(actor()).await.unwrap().is_empty());
+    assert!(!data.discord_shop.directory.exists());
+    assert!(data.sqlite_shop.list(actor()).await.unwrap().is_empty());
     data.database.close().await.unwrap();
 }
 
@@ -176,18 +177,19 @@ async fn 出品先の候補は本人の所属を確認し空のページでも�
     let http = mock.http();
     let mut start = component("content:post:100", 200);
     start.guild_id = Some(GuildId::new(100));
-    assert!(posting_action(&http, &data, &start).await.is_err());
+    assert!(data.posting_action(&http, &start).await.is_err());
     assert!(data.uploads.lock().await.is_empty());
-    receive_upload(&http, &data, &upload(955)).await.unwrap();
+    data.receive_upload(&http, &upload(955)).await.unwrap();
     assert_eq!(data.uploads.lock().await.get(&200).unwrap().guild, None);
     // 共用HTTPでは100・101に所属しているため、未所属候補は102以降。
     for id in 102..127 {
         data.shop_channels.insert(
-            DomainGuildId::try_from(id).unwrap(),
-            crate::domain::ChannelId::try_from(400).unwrap(),
+            values::guild_id(id).unwrap(),
+            values::channel_id(400).unwrap(),
         );
     }
-    let (_, rows) = selling_servers(&http, &data, UserId::new(200), "955", 0)
+    let (_, rows) = data
+        .selling_servers(&http, UserId::new(200), "955", 0)
         .await
         .unwrap();
     assert_eq!(
@@ -197,21 +199,23 @@ async fn 出品先の候補は本人の所属を確認し空のページでも�
             .len(),
         1
     );
-    let (text, rows) = selling_servers(&http, &data, UserId::new(200), "955", 1)
+    let (text, rows) = data
+        .selling_servers(&http, UserId::new(200), "955", 1)
         .await
         .unwrap();
     assert!(text.contains("2/2"));
     assert_eq!(rows.len(), 1);
     mock.deny_member
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = listing_form(&data, UserId::new(200), "955", Some("100"))
+    let _ = data
+        .listing_form(UserId::new(200), "955", Some("100"))
         .await
         .unwrap();
     assert!(
-        listing_preview(&http, &data, &modal(955, 100, 200, "500"))
+        data.listing_preview(&http, &modal(955, 100, 200, "500"))
             .await
             .is_err()
     );
-    assert!(!data.content_dir.exists());
+    assert!(!data.discord_shop.directory.exists());
     data.database.close().await.unwrap();
 }

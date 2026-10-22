@@ -1,6 +1,6 @@
 # Discord内でのコンテンツ売買
 
-Webストアを使わず、出品・商品表示・購入確認・ファイル受け取り・再送をDiscord内で完結させる。コンテンツは出品者と購入者の間で対象ギルドのNOTを同額移動する。ロールは購入者のNOTだけを減らし、出品者には加算しない。[DB設計](DATABASE.md)・[ユースケース設計](REPOSITORY.md)・[アーキテクチャ](ARCHITECTURE.md)に対応する。
+Webストアを使わず、出品・商品表示・購入確認・ファイル受け取り・再送をDiscord内で完結させる。コンテンツは出品者と購入者の間で対象ギルドのNOTを同額移動する。ロールは購入者のNOTだけを減らし、出品者には加算しない。[DB設計](DATABASE.md)・[Repository設計](REPOSITORY.md)・[アーキテクチャ](ARCHITECTURE.md)に対応する。
 
 ## レビュー
 
@@ -98,28 +98,31 @@ P09では確認IDを `ギルドID-購入ボタンのInteraction ID` とし、DM�
 ```mermaid
 sequenceDiagram
     actor 購入者
-    participant Discord as Discord (Poise)
-    participant UseCase as ShopUseCase（インフラ）
+    participant Discord as commands (Poise)
+    participant Source as discord::NotRepository
+    participant Repository as sqlite::ShopRepository
     participant DB as SQLite
     購入者->>Discord: ギルドの購入ボタン
-    Discord->>UseCase: 認証済み実行者・商品ID・確認ID
-    UseCase->>DB: 商品と残高を照会
-    UseCase-->>Discord: PurchaseQuote
+    Discord->>Source: 本人の所属・権限を取得
+    Source-->>Discord: domain::Actor
+    Discord->>Repository: domain::Actor・商品ID・確認ID
+    Repository->>DB: 商品と残高を照会
+    Repository-->>Discord: domain::PurchaseQuote
     Discord-->>購入者: DMの確認Embed
     購入者->>Discord: はい（表示価格で購入）
     Discord->>Discord: 応答受付・本人と確認の照合・所属とファイルの確認
-    Discord->>UseCase: purchase(actor, quote, 受付時のサーバー時刻)
-    UseCase->>DB: BEGIN IMMEDIATE
-    UseCase->>DB: 同じ確認IDの処理済み結果・最新商品・残高を確認
+    Discord->>Repository: purchase(actor, quote, 受付時のサーバー時刻)
+    Repository->>DB: BEGIN IMMEDIATE
+    Repository->>DB: 同じ確認IDの処理済み結果・最新商品・残高を確認
     alt 初回購入かつ条件を満たす
-        UseCase->>DB: 購入者の減算と出品者の加算をINSERT
-        UseCase->>DB: COMMIT
+        Repository->>DB: 購入者の減算と出品者の加算をINSERT
+        Repository->>DB: COMMIT
     else 同じ確認IDで購入済み
-        UseCase->>DB: 既存の取引を取得して終了
+        Repository->>DB: 既存の取引を取得して終了
     else 価格変更・残高不足・販売終了など
-        UseCase->>DB: ROLLBACK
+        Repository->>DB: ROLLBACK
     end
-    UseCase-->>Discord: 購入結果
+    Repository-->>Discord: domain::PurchaseResult
     opt 購入権限が有効
         Discord-->>購入者: 保持したファイルをDMへ添付送信
     end
@@ -130,7 +133,7 @@ sequenceDiagram
 - `BEGIN IMMEDIATE` 内で、同じ確認IDの処理済み取引 → 商品の販売状態・版・価格 → 自己購入・購入済み → 両者の残高と算術、の順に照合する。価格・版が変わっていたら課金せず、新しい条件での確認へ戻す。
 - イベントキーは `content:{quote_id}:buyer`・`content:{quote_id}:seller` とする。ボタンクリックごとのInteraction IDを決済キーにしない。同じ確認IDは両行の一意制約で重複を防ぎ、別の確認IDによる同時購入も未返金の購入履歴で防ぐ。
 - 初回の購入可否・期限の検証より先に、同じ確認IDで確定済みかを調べる。購入後の価格変更・期限切れ・商品削除が、処理済み結果の照合や有効な購入権限による再送を妨げないようにする。返金済みの確認IDも再課金に使わず、再送権限は未返金かを別途確認する。
-- COMMIT後にDiscord側の処理がファイルをDMへ送る。`ShopUseCase.purchase` は取引結果と現在の商品を返す。配送の直前にはP06の `get_content_for_purchase` で購入権限を確認し、購入結果だけで配送を許可しない。ファイル送信結果を取引失敗として扱わない。P13のロール商品も同じ確認・決済を使い、未返金の権利を `get_purchase` で照合してSerenityから付与する。未付与を確認した場合の返金と、保有不明・返金不能時の再照合は `services.rs` で扱い、ファイルの無料再送とは分ける。
+- COMMIT後にDiscord側の処理がファイルをDMへ送る。`ShopRepository.purchase` は取引結果と現在の商品を返す。配送の直前にはP06の `get_content_for_purchase` で購入権限を確認し、購入結果だけで配送を許可しない。ファイル送信結果を取引失敗として扱わない。P13のロール商品も同じ確認・決済を使い、未返金の権利を `get_purchase` で照合してSerenityから付与する。未付与を確認した場合の返金と、保有不明・返金不能時の再照合は `commands.rs` で扱い、ファイルの無料再送とは分ける。
 - 決済後の送信失敗・結果不明は `DeliveryPending` と購入IDを案内する。DMにも応答できない場合は次回の操作で購入済み状態を表示する。送れたか不明な場合に、返金や再購入を自動実行しない。
 - 「購入したもの」ボタンまたは `/content purchases guild:対象サーバー` で購入一覧を開き、「再送する」を押せるようにする。購入履歴・購入者・未返金を再検証し、追加課金しない。再送が重複する場合はあっても、課金は重複させない。
 - 返金は認可された明示操作として扱う。従来どおり購入者への返金と出品者の売上取消を一括追記する。出品者の残高不足なら返金できないため、DM失敗時の即時返金は保証しない。
@@ -157,13 +160,13 @@ P04の実装は1バイト〜20 MiBの単一ファイルを受け付ける。2026
 
 ファイルの永続保存を先に完了し、その後に商品をDBへ確定する。DB確定前に失敗した一時ファイルは破棄できるが、商品として確定したファイルは上書きしない。購入者に送ったファイルの回収・転送制限はできない。返金で停止できるのは以後のBotからの再送である。
 
-保存処理が返す `StoredContent` を商品作成へ渡し、ユースケースは保存したユーザー・ギルドを照合する。商品削除後もファイルを保持する。DB確定に失敗した場合も完成ファイルは残して同じキーで再試行する。プロセス強制終了で残る `.pending-*` と未登録の完成ファイルの自動清掃は追加しない。
+commandsが保存処理から受け取った `domain::StoredContent` をSQLiteの商品作成へ渡し、SQLite Repositoryは保存したユーザー・ギルドを照合する。商品削除後もファイルを保持する。DB確定に失敗した場合も完成ファイルは残して同じキーで再試行する。プロセス強制終了で残る `.pending-*` と未登録の完成ファイルの自動清掃は追加しない。
 
 ## 最小の構成と検証点
 
-- [2層の設計](ARCHITECTURE.md)に従い、ドメインは共通型、インフラは変換・検証・操作・I/Oを担当する。`ShopUseCase` はインフラ内の操作処理であり、独立したアプリケーション層ではない。コードもこの2層へ移行済み。
-- UIは `discord/commands.rs`、イベントは `events.rs`、共有の認証・変換は `services.rs`、ファイル保存は `content.rs` に置く。PoiseとSerenityを使い、Web・OAuth・専用のMapperは追加しない。
-- 購入・認可・金額・版の照合は `ShopUseCase`、SQL・SeaORMのモデルは既存のDB実装に置く。
+- [2層の設計](ARCHITECTURE.md)に従い、ドメインは共通型、インフラは変換・検証・操作・I/Oを担当する。Repositoryは外部データとドメイン値のやり取りを担当する。commands／eventsが各Repositoryを別々に呼び、ドメイン値を受け渡す。
+- UI・返信・ロール操作は `discord/commands.rs`、Gateway処理は `events.rs`、所属・権限の取得と変換は `not.rs`、商品入力の変換は `shop.rs`、添付・ファイルI/Oの実装は `content.rs` に置く。PoiseとSerenityを使い、Web・OAuth・専用のMapperは追加しない。
+- 購入・金額・版とDB側の認可の照合は `sqlite::ShopRepository`、SQL・SeaORMのモデルは既存のDB実装に置く。
 - 商品説明、ファイル情報、公開メッセージの記録をDBへ加える。下書き・未決済の確認・配送状態の専用テーブルは作らず、確定済みの購入履歴から再送権限を求める。
 - 対象チャンネルは初期設定でギルドごとに指定する。Botの閲覧・投稿・Embed権限を確認する。一般ユーザーにチャンネルの管理権限は要求しない。
 

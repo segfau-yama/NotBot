@@ -1,3 +1,4 @@
+use crate::infrastructure::types as values;
 use std::time::{Duration, UNIX_EPOCH};
 
 use serenity::json::{from_value, json};
@@ -19,26 +20,25 @@ async fn 投稿と反応の報酬は対象者を確認し再配信や再起動�
     value["author"]["id"] = json!("201");
     value["author"]["bot"] = json!(false);
     let post: Message = from_value(value.clone()).unwrap();
-    reward_message(&http, &data, &post, now).await.unwrap();
-    reward_message(&http, &data, &post, now + Duration::from_secs(60))
+    data.reward_message(&http, &post, now).await.unwrap();
+    data.reward_message(&http, &post, now + Duration::from_secs(60))
         .await
         .unwrap();
-    let buyer = Actor::new(
-        actor().guild_id(),
-        crate::domain::UserId::try_from(201).unwrap(),
-        false,
-    );
-    assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 5);
+    let buyer = values::actor(actor().guild_id(), values::user_id(201).unwrap(), false);
+    assert_eq!(data.sqlite_not.get_balance(buyer).await.unwrap().get(), 5);
     value["id"] = json!("901");
     value["type"] = json!(19);
     value["message_reference"] =
         json!({"message_id":"900","channel_id":"400","guild_id":"100","type":0});
     let reply: Message = from_value(value.clone()).unwrap();
-    reward_message(&http, &data, &reply, now + Duration::from_secs(60))
+    data.reward_message(&http, &reply, now + Duration::from_secs(60))
         .await
         .unwrap();
-    assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 10);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 20);
+    assert_eq!(data.sqlite_not.get_balance(buyer).await.unwrap().get(), 10);
+    assert_eq!(
+        data.sqlite_not.get_balance(actor()).await.unwrap().get(),
+        20
+    );
     for (id, field, input) in [
         (
             "902",
@@ -52,9 +52,8 @@ async fn 投稿と反応の報酬は対象者を確認し再配信や再起動�
         let mut ignored = value.clone();
         ignored["id"] = json!(id);
         ignored[field] = input;
-        reward_message(
+        data.reward_message(
             &http,
-            &data,
             &from_value(ignored).unwrap(),
             now + Duration::from_secs(600),
         )
@@ -66,36 +65,42 @@ async fn 投稿と反応の報酬は対象者を確認し再配信や再起動�
         "emoji":{"name":"👍"},"burst":false,"type":0}),
     )
     .unwrap();
-    reward_reaction(&http, &data, &click, now).await.unwrap();
-    assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 11);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 30);
+    data.reward_reaction(&http, &click, now).await.unwrap();
+    assert_eq!(data.sqlite_not.get_balance(buyer).await.unwrap().get(), 11);
+    assert_eq!(
+        data.sqlite_not.get_balance(actor()).await.unwrap().get(),
+        30
+    );
     data.database.close().await.unwrap();
     let data = setup(&directory).await;
     click.emoji = ReactionType::Unicode("🎉".into());
-    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
+    data.reward_reaction(&http, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(200));
-    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
+    data.reward_reaction(&http, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(42));
-    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
+    data.reward_reaction(&http, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     click.user_id = Some(UserId::new(202));
     mock.reward_message.lock().unwrap()["webhook_id"] = json!("42");
-    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
+    data.reward_reaction(&http, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
     mock.reward_message.lock().unwrap()["webhook_id"] = json!(null);
     mock.deny_member
         .store(true, std::sync::atomic::Ordering::Relaxed);
-    reward_reaction(&http, &data, &click, now + Duration::from_secs(600))
+    data.reward_reaction(&http, &click, now + Duration::from_secs(600))
         .await
         .unwrap();
-    assert_eq!(data.not.get_balance(buyer).await.unwrap().get(), 11);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 30);
+    assert_eq!(data.sqlite_not.get_balance(buyer).await.unwrap().get(), 11);
+    assert_eq!(
+        data.sqlite_not.get_balance(actor()).await.unwrap().get(),
+        30
+    );
     assert!(mock.posts().is_empty());
     data.database.close().await.unwrap();
 }

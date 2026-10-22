@@ -1,10 +1,8 @@
-use super::{Data, content, services::download_client};
+use super::Data;
+use crate::infrastructure::types as values;
 use crate::{
-    domain::{Actor, ItemDetails, Price, ShopItem},
-    infrastructure::{
-        MAX_CONTENT_BYTES,
-        sqlite::{SqliteDatabaseAccess, not::NotUseCase, shop::ShopUseCase},
-    },
+    domain::{Actor, ShopItem},
+    infrastructure::{MAX_CONTENT_BYTES, sqlite::SqliteDatabaseAccess},
 };
 use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use serenity::{
@@ -46,9 +44,9 @@ impl Drop for TestDirectory {
 }
 
 pub(super) fn actor() -> Actor {
-    Actor::new(
-        crate::domain::GuildId::try_from(100).unwrap(),
-        crate::domain::UserId::try_from(200).unwrap(),
+    values::actor(
+        values::guild_id(100).unwrap(),
+        values::user_id(200).unwrap(),
         false,
     )
 }
@@ -384,37 +382,23 @@ pub(super) async fn setup(directory: &TestDirectory) -> Data {
     let database = SqliteDatabaseAccess::open(directory.0.join("db.sqlite"))
         .await
         .unwrap();
-    Data {
-        not: NotUseCase::new(database.clone()),
-        shop: ShopUseCase::new(database.clone()),
+    Data::new(
         database,
-        content_dir: directory.0.join("private"),
-        shop_channels: HashMap::from([(
-            actor().guild_id(),
-            crate::domain::ChannelId::try_from(400).unwrap(),
-        )]),
-        download: download_client().unwrap(),
-        publication_locks: tokio::sync::Mutex::new(HashMap::new()),
-        drafts: tokio::sync::Mutex::new(HashMap::new()),
-        uploads: tokio::sync::Mutex::new(HashMap::new()),
-        confirmations: tokio::sync::Mutex::new(HashMap::new()),
-        voice: tokio::sync::Mutex::new(HashMap::new()),
-    }
+        directory.0.join("private"),
+        HashMap::from([(actor().guild_id(), values::channel_id(400).unwrap())]),
+    )
+    .unwrap()
 }
 
 pub(super) async fn saved_item(data: &Data) -> ShopItem {
-    let saved = content::store_content(
-        &data.content_dir,
-        actor(),
-        "private-save-key",
-        "資料.pdf",
-        &b"pdf"[..],
-    )
-    .unwrap();
-    data.shop
+    let saved = data
+        .discord_shop
+        .store_content(actor(), "private-save-key", "資料.pdf", &b"pdf"[..])
+        .unwrap();
+    data.sqlite_shop
         .create(
             actor(),
-            ItemDetails::try_new("資料集", "商品説明", Price::try_from(500).unwrap()).unwrap(),
+            values::item_details("資料集", "商品説明", values::price(500).unwrap()).unwrap(),
             saved,
         )
         .await

@@ -1,65 +1,65 @@
-use super::{commands, events, services};
+use super::{commands, events};
 
 use crate::{
-    domain::{ChannelId, GuildId, ItemId, PurchaseQuote},
-    infrastructure::{
-        Error,
-        config::Config,
-        sqlite::{SqliteDatabaseAccess, not::NotUseCase, shop::ShopUseCase},
-    },
+    domain::{ChannelId, GuildId},
+    infrastructure::{Error, config::Config, sqlite::SqliteDatabaseAccess},
 };
 use serenity::all::{Client, Command, CreateAllowedMentions, GatewayIntents};
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Weak},
-};
-use tokio::sync::Mutex;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 pub struct Data {
-    pub(super) not: NotUseCase,
-    pub(super) shop: ShopUseCase,
+    pub(super) sqlite_not: crate::infrastructure::sqlite::not::NotRepository,
+    pub(super) sqlite_shop: crate::infrastructure::sqlite::shop::ShopRepository,
+    pub(super) discord_shop: super::shop::ShopRepository,
+    #[cfg(test)]
     pub(super) database: SqliteDatabaseAccess,
-    pub(super) content_dir: PathBuf,
     pub(super) shop_channels: HashMap<GuildId, ChannelId>,
     pub(super) download: reqwest::Client,
-    pub(super) publication_locks: Mutex<HashMap<ItemId, Weak<Mutex<()>>>>,
-    pub(super) drafts: Mutex<HashMap<u64, services::ListingDraft>>,
-    pub(super) uploads: Mutex<HashMap<u64, services::Upload>>,
-    pub(super) confirmations: Mutex<HashMap<String, PurchaseQuote>>,
-    pub(super) voice:
-        Mutex<HashMap<(serenity::all::GuildId, serenity::all::UserId), events::Attendance>>,
+    pub(super) publication_locks:
+        tokio::sync::Mutex<HashMap<crate::domain::ItemId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    pub(super) drafts: tokio::sync::Mutex<HashMap<u64, commands::ListingDraft>>,
+    pub(super) uploads: tokio::sync::Mutex<HashMap<u64, commands::Upload>>,
+    pub(super) confirmations: tokio::sync::Mutex<HashMap<String, crate::domain::PurchaseQuote>>,
+    pub(super) voice: tokio::sync::Mutex<
+        HashMap<(serenity::all::GuildId, serenity::all::UserId), events::Attendance>,
+    >,
 }
-
 impl Data {
-    pub(super) async fn publication_lock(&self, item: ItemId) -> Arc<Mutex<()>> {
-        let mut locks = self.publication_locks.lock().await;
-        locks.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = locks.get(&item).and_then(Weak::upgrade) {
-            return lock;
-        }
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(item, Arc::downgrade(&lock));
-        lock
+    pub(super) fn new(
+        database: SqliteDatabaseAccess,
+        directory: PathBuf,
+        shop_channels: HashMap<GuildId, ChannelId>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            sqlite_not: crate::infrastructure::sqlite::not::NotRepository::new(database.clone()),
+            sqlite_shop: crate::infrastructure::sqlite::shop::ShopRepository::new(database.clone()),
+            discord_shop: super::shop::ShopRepository::new(directory),
+            #[cfg(test)]
+            database,
+            shop_channels,
+            download: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|_| "添付取得の準備に失敗しました。")?,
+            publication_locks: Default::default(),
+            drafts: Default::default(),
+            uploads: Default::default(),
+            confirmations: Default::default(),
+            voice: Default::default(),
+        })
     }
 }
 
 pub type Context<'a> = poise::ApplicationContext<'a, Arc<Data>, Error>;
 
 pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), Error> {
-    let data = Arc::new(Data {
-        not: NotUseCase::new(database.clone()),
-        shop: ShopUseCase::new(database.clone()),
+    let data = Arc::new(Data::new(
         database,
-        content_dir: config.content_dir().clone(),
-        shop_channels: config.shop_channels().clone(),
-        download: services::download_client()?,
-        publication_locks: Mutex::new(HashMap::new()),
-        drafts: Mutex::new(HashMap::new()),
-        uploads: Mutex::new(HashMap::new()),
-        confirmations: Mutex::new(HashMap::new()),
-        voice: Mutex::new(HashMap::new()),
-    });
+        config.content_dir().clone(),
+        config.shop_channels().clone(),
+    )?);
+
     let voice_data = data.clone();
     let commands = vec![commands::not(), commands::content(), commands::role()];
     let registration = poise::builtins::create_application_commands(&commands);
@@ -112,7 +112,7 @@ pub async fn run(config: &Config, database: SqliteDatabaseAccess) -> Result<(), 
         #[cfg(not(unix))]
         tokio::signal::ctrl_c().await
     } => result.map_err(Into::into),
-            _ = events::reward_voice(&http, &cache, &voice_data) => Ok(()),
+            _ = voice_data.reward_voice(&http, &cache) => Ok(()),
         };
     client.shard_manager.shutdown_all().await;
     result

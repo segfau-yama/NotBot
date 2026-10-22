@@ -1,46 +1,40 @@
+use crate::infrastructure::discord::Data;
+use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
+use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
 use crate::infrastructure::discord::test_support::actor;
+use crate::infrastructure::types as values;
 use std::{sync::atomic::Ordering, time::SystemTime};
 
 use serenity::json::{json, to_value};
 
 use super::*;
-use crate::{
-    domain::Balance,
-    infrastructure::discord::{services, test_support::*},
-};
+use crate::infrastructure::discord::test_support::*;
 
 fn seller() -> Actor {
-    Actor::new(
-        actor().guild_id(),
-        crate::domain::UserId::try_from(999).unwrap(),
-        true,
-    )
+    values::actor(actor().guild_id(), values::user_id(999).unwrap(), true)
 }
 fn buyer() -> Actor {
-    Actor::new(
-        actor().guild_id(),
-        crate::domain::UserId::try_from(201).unwrap(),
-        false,
-    )
+    values::actor(actor().guild_id(), values::user_id(201).unwrap(), false)
 }
 async fn scenario() -> (TestDirectory, Data, ShopItem) {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
-    data.not
+    data.sqlite_not
         .adjust_balance(
             seller(),
             buyer().user_id(),
-            Balance::try_from(1200).unwrap(),
+            values::balance(1200).unwrap(),
             "fund",
         )
         .await
         .unwrap();
     let item = data
-        .shop
+        .sqlite_shop
         .create_role(
             seller(),
-            crate::domain::RoleId::try_from(500).unwrap(),
-            services::item_details("会員権".into(), "会員ロール".into(), "500").unwrap(),
+            values::role_id(500).unwrap(),
+            DiscordShopRepository::item_details("会員権".into(), "会員ロール".into(), "500")
+                .unwrap(),
         )
         .await
         .unwrap();
@@ -50,7 +44,8 @@ async fn offer(http: &Http, data: &Data, item: &ShopItem, id: u64) -> Result<(),
     let mut click = component(&format!("content:buy:100:{}", item.id()), 201);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(id);
-    services::purchase_action(http, data, &click, SystemTime::now()).await?;
+    data.purchase_action(http, &click, SystemTime::now())
+        .await?;
     Ok(())
 }
 async fn confirm(
@@ -58,9 +53,8 @@ async fn confirm(
     data: &Data,
     id: u64,
 ) -> Result<(String, Vec<CreateActionRow>), Error> {
-    services::purchase_action(
+    data.purchase_action(
         http,
-        data,
         &component(&format!("content:confirm:100-{id}:yes"), 201),
         SystemTime::now(),
     )
@@ -73,30 +67,31 @@ async fn ロール販売は管理権限と階層を確認し売買後の返金�
     let mock = MockDiscord::new();
     let http = mock.http();
     assert!(
-        services::authenticate(&http, GuildId::new(100), UserId::new(999))
+        DiscordNotRepository::new(&http)
+            .authenticate(GuildId::new(100), UserId::new(999))
             .await
             .unwrap()
             .can_manage_not()
     );
-    let role = crate::domain::RoleId::try_from(500).unwrap();
+    let role = values::role_id(500).unwrap();
     assert!(
-        data.shop
+        data.sqlite_shop
             .create_role(actor(), role, item.details().clone())
             .await
             .is_err()
     );
     assert_eq!(
-        data.shop
+        data.sqlite_shop
             .create_role(seller(), role, item.details().clone())
             .await
             .unwrap(),
         item
     );
     assert_eq!(
-        data.shop
+        data.sqlite_shop
             .prepare_purchase(seller(), item.id(), "self", SystemTime::now())
             .await,
-        Err(UseCaseError::InsufficientBalance)
+        Err(RepositoryError::InsufficientBalance)
     );
     for (index, field, value) in [
         (0, "managed", json!(true)),
@@ -106,18 +101,21 @@ async fn ロール販売は管理権限と階層を確認し売買後の返金�
         let old = mock.role_definitions.lock().unwrap()[index][field].clone();
         mock.role_definitions.lock().unwrap()[index][field] = value;
         assert!(offer(&http, &data, &item, 910).await.is_err());
-        assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
+        assert_eq!(
+            data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+            1200
+        );
         mock.role_definitions.lock().unwrap()[index][field] = old;
     }
     assert!(
-        check_role(&http, GuildId::new(100), RoleId::new(100))
+        Data::check_role(&http, GuildId::new(100), RoleId::new(100))
             .await
             .is_err()
     );
     mock.role_members.lock().unwrap().insert((100, 201));
     assert!(offer(&http, &data, &item, 910).await.is_err());
     mock.role_members.lock().unwrap().remove(&(100, 201));
-    services::publication_status(&http, &data, seller(), item.id())
+    data.publication_status(&http, seller(), item.id())
         .await
         .unwrap();
     assert!(
@@ -129,24 +127,31 @@ async fn ロール販売は管理権限と階層を確認し売買後の返金�
     let (first, second) = tokio::join!(confirm(&http, &data, 911), confirm(&http, &data, 911));
     assert!(first.is_ok() || second.is_ok());
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
-    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 0);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
+    assert_eq!(
+        data.sqlite_not.get_balance(seller()).await.unwrap().get(),
+        0
+    );
     let purchase = data
-        .shop
+        .sqlite_shop
         .list_purchases(buyer())
         .await
         .unwrap()
         .remove(0)
         .buyer()
         .id();
-    assert!(deliver_role(&http, &data, actor(), purchase).await.is_err());
+    assert!(data.deliver_role(&http, actor(), purchase).await.is_err());
     assert!(
-        refund_role(&http, &data, buyer(), purchase, "unauthorized")
+        data.refund_role(&http, buyer(), purchase, "unauthorized")
             .await
             .is_err()
     );
+    let purchases = data.sqlite_shop.list_purchases(buyer()).await.unwrap();
     assert!(
-        services::list_purchases(&http, &data, buyer(), 0)
+        Data::purchase_page(&http, buyer(), &purchases, 0)
             .await
             .unwrap()
             .0
@@ -154,30 +159,37 @@ async fn ロール販売は管理権限と階層を確認し売買後の返金�
     );
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        refund_role(&http, &data, seller(), purchase, "manual")
+        data.refund_role(&http, seller(), purchase, "manual")
             .await
             .is_err()
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
     mock.role_change_mode.store(0, Ordering::Relaxed);
-    let original = refund_role(&http, &data, seller(), purchase, "manual")
+    let original = data
+        .refund_role(&http, seller(), purchase, "manual")
         .await
         .unwrap();
     assert_eq!(
-        refund_role(&http, &data, seller(), purchase, "manual")
+        data.refund_role(&http, seller(), purchase, "manual")
             .await
             .unwrap(),
         original
     );
-    let message =
-        super::super::commands::refund_purchase(&http, &data, seller(), purchase, "manual")
-            .await
-            .unwrap();
+    let message = data
+        .refund_purchase(&http, seller(), purchase, "manual")
+        .await
+        .unwrap();
     assert!(message.contains("500 NOTを返金"));
     assert!(!message.contains("売上取消ID"));
     assert!(!mock.role_members.lock().unwrap().contains(&(100, 201)));
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
-    assert!(deliver_role(&http, &data, buyer(), purchase).await.is_err());
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        1200
+    );
+    assert!(data.deliver_role(&http, buyer(), purchase).await.is_err());
     let definition = to_value(
         super::super::commands::role()
             .create_as_slash_command()
@@ -200,11 +212,11 @@ async fn 出品者本人のロール購入も代金を減らし返金は元の�
     let (_directory, data, item) = scenario().await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    data.not
+    data.sqlite_not
         .adjust_balance(
             seller(),
             seller().user_id(),
-            Balance::try_from(i64::MAX).unwrap(),
+            values::balance(i64::MAX).unwrap(),
             "seller-fund",
         )
         .await
@@ -212,7 +224,7 @@ async fn 出品者本人のロール購入も代金を減らし返金は元の�
     let mut click = component(&format!("content:buy:100:{}", item.id()), 999);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(930);
-    services::purchase_action(&http, &data, &click, SystemTime::now())
+    data.purchase_action(&http, &click, SystemTime::now())
         .await
         .unwrap();
     assert!(mock.posts().iter().any(|body| {
@@ -228,64 +240,67 @@ async fn 出品者本人のロール購入も代金を減らし返金は元の�
     }));
     let confirm = component("content:confirm:100-930:yes", 999);
     for _ in 0..2 {
-        services::purchase_action(&http, &data, &confirm, SystemTime::now())
+        data.purchase_action(&http, &confirm, SystemTime::now())
             .await
             .unwrap();
     }
-    let purchases = data.shop.list_purchases(seller()).await.unwrap();
+    let purchases = data.sqlite_shop.list_purchases(seller()).await.unwrap();
     assert_eq!(purchases.len(), 1);
     let purchase = purchases[0].buyer().id();
     assert!(mock.role_members.lock().unwrap().contains(&(100, 999)));
     assert_eq!(
-        data.not.get_balance(seller()).await.unwrap().get(),
+        data.sqlite_not.get_balance(seller()).await.unwrap().get(),
         i64::MAX - 500
     );
-    refund_role(&http, &data, seller(), purchase, "self-return")
+    data.refund_role(&http, seller(), purchase, "self-return")
         .await
         .unwrap();
     assert!(!mock.role_members.lock().unwrap().contains(&(100, 999)));
     assert_eq!(
-        data.not.get_balance(seller()).await.unwrap().get(),
+        data.sqlite_not.get_balance(seller()).await.unwrap().get(),
         i64::MAX
     );
     assert_eq!(
-        data.shop.get_purchase(seller(), purchase).await,
-        Err(UseCaseError::AlreadyRefunded)
+        data.sqlite_shop.get_purchase(seller(), purchase).await,
+        Err(RepositoryError::AlreadyRefunded)
     );
 
     let quote = data
-        .shop
+        .sqlite_shop
         .prepare_purchase(seller(), item.id(), "self-rebuy", SystemTime::now())
         .await
         .unwrap();
     let purchase = data
-        .shop
+        .sqlite_shop
         .purchase(seller(), &quote, SystemTime::now())
         .await
         .unwrap()
         .buyer()
         .id();
-    data.not
+    data.sqlite_not
         .adjust_balance(
             seller(),
             seller().user_id(),
-            Balance::try_from(0).unwrap(),
+            values::balance(0).unwrap(),
             "seller-spent",
         )
         .await
         .unwrap();
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        deliver_role(&http, &data, seller(), purchase)
+        data.deliver_role(&http, seller(), purchase)
             .await
             .unwrap()
             .0
             .contains("返金しました")
     );
-    assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 500);
     assert_eq!(
-        data.shop.get_purchase(seller(), purchase).await,
-        Err(UseCaseError::AlreadyRefunded)
+        data.sqlite_not.get_balance(seller()).await.unwrap().get(),
+        500
+    );
+    assert_eq!(
+        data.sqlite_shop.get_purchase(seller(), purchase).await,
+        Err(RepositoryError::AlreadyRefunded)
     );
     data.database.close().await.unwrap();
 }
@@ -301,10 +316,16 @@ async fn ロールの未付与を確認できたときだけ返金し結果不�
         let (text, _) = confirm(&http, &data, 920).await.unwrap();
         if mode == 1 {
             assert!(text.contains("返金しました"));
-            assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
-            assert_eq!(data.not.get_balance(seller()).await.unwrap().get(), 0);
+            assert_eq!(
+                data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+                1200
+            );
+            assert_eq!(
+                data.sqlite_not.get_balance(seller()).await.unwrap().get(),
+                0
+            );
             assert!(
-                data.shop
+                data.sqlite_shop
                     .list_role_purchases(buyer().guild_id())
                     .await
                     .unwrap()
@@ -313,24 +334,36 @@ async fn ロールの未付与を確認できたときだけ返金し結果不�
             assert!(confirm(&http, &data, 920).await.is_err());
         } else if mode == 2 {
             assert!(text.contains("付与・確認"));
-            assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+            assert_eq!(
+                data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+                700
+            );
             assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
         } else {
             assert!(text.contains("RoleDeliveryPending"));
             assert!(!text.contains("private-role"));
-            assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
-            data.shop.delete(seller(), item.id(), 1).await.unwrap();
+            assert_eq!(
+                data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+                700
+            );
+            data.sqlite_shop
+                .delete(seller(), item.id(), 1)
+                .await
+                .unwrap();
             data.database.close().await.unwrap();
             let data = setup(&directory).await;
             mock.role_change_mode.store(0, Ordering::Relaxed);
             mock.fail_role_lookup.store(false, Ordering::Relaxed);
-            reconcile_roles(&http, &data, GuildId::new(100))
+            data.reconcile_roles(&http, GuildId::new(100))
                 .await
                 .unwrap();
             assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
-            assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
             assert_eq!(
-                data.shop
+                data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+                700
+            );
+            assert_eq!(
+                data.sqlite_shop
                     .list_role_purchases(buyer().guild_id())
                     .await
                     .unwrap()
@@ -357,61 +390,68 @@ async fn 返金で購入者の残高上限を超える場合は権利を維持�
     let mock = MockDiscord::new();
     let http = mock.http();
     let quote = data
-        .shop
+        .sqlite_shop
         .prepare_purchase(buyer(), item.id(), "paid-before-crash", SystemTime::now())
         .await
         .unwrap();
     let purchase = data
-        .shop
+        .sqlite_shop
         .purchase(buyer(), &quote, SystemTime::now())
         .await
         .unwrap()
         .buyer()
         .id();
-    data.not
+    data.sqlite_not
         .adjust_balance(
             seller(),
             buyer().user_id(),
-            Balance::try_from(i64::MAX).unwrap(),
+            values::balance(i64::MAX).unwrap(),
             "buyer-at-limit",
         )
         .await
         .unwrap();
     mock.role_change_mode.store(1, Ordering::Relaxed);
     assert!(
-        deliver_role(&http, &data, buyer(), purchase)
+        data.deliver_role(&http, buyer(), purchase)
             .await
             .unwrap()
             .0
             .contains("RoleDeliveryPending")
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), i64::MAX);
-    assert!(data.shop.get_purchase(buyer(), purchase).await.is_ok());
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        i64::MAX
+    );
+    assert!(
+        data.sqlite_shop
+            .get_purchase(buyer(), purchase)
+            .await
+            .is_ok()
+    );
     mock.role_change_mode.store(0, Ordering::Relaxed);
-    reconcile_roles(&http, &data, GuildId::new(100))
+    data.reconcile_roles(&http, GuildId::new(100))
         .await
         .unwrap();
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
     assert!(
-        refund_role(&http, &data, seller(), purchase, "buyer-overflow")
+        data.refund_role(&http, seller(), purchase, "buyer-overflow")
             .await
             .is_err()
     );
     assert!(mock.role_members.lock().unwrap().contains(&(100, 201)));
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), i64::MAX);
-    let foreign = Actor::new(
-        crate::domain::GuildId::try_from(101).unwrap(),
-        buyer().user_id(),
-        true,
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        i64::MAX
     );
-    assert!(deliver_role(&http, &data, foreign, purchase).await.is_err());
+    let foreign = values::actor(values::guild_id(101).unwrap(), buyer().user_id(), true);
+    assert!(data.deliver_role(&http, foreign, purchase).await.is_err());
     assert!(
-        refund_role(&http, &data, foreign, purchase, "foreign")
+        data.refund_role(&http, foreign, purchase, "foreign")
             .await
             .is_err()
     );
     assert_eq!(
-        data.shop
+        data.sqlite_shop
             .list_role_purchases(foreign.guild_id())
             .await
             .unwrap()

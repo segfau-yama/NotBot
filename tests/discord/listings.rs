@@ -1,4 +1,6 @@
+use crate::infrastructure::discord::shop::ShopRepository as DiscordShopRepository;
 use crate::infrastructure::discord::test_support::actor;
+use crate::infrastructure::types as values;
 use std::{
     io::{Read, Write},
     net::TcpListener,
@@ -24,9 +26,7 @@ fn draft(id: &str) -> ListingDraft {
     ListingDraft::new(
         id.into(),
         actor(),
-        "資料集".into(),
-        "商品説明".into(),
-        "500",
+        DiscordShopRepository::item_details("資料集".into(), "商品説明".into(), "500").unwrap(),
         attachment(),
     )
     .unwrap()
@@ -62,18 +62,60 @@ fn 出品コマンドは本人との会話で商品情報と価格とサーバ�
 }
 
 #[test]
+fn 商品と購入とロールの識別子には正の十進整数だけを指定できる() {
+    for input in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        " 1",
+        "1 ",
+        "1.0",
+        "１２",
+        "18446744073709551616",
+    ] {
+        assert!(
+            DiscordShopRepository::parse_item_id(input).is_err(),
+            "{input}"
+        );
+        assert!(
+            DiscordShopRepository::parse_purchase_id(input).is_err(),
+            "{input}"
+        );
+        assert!(
+            DiscordShopRepository::parse_role_id(input).is_err(),
+            "{input}"
+        );
+    }
+    assert_eq!(
+        DiscordShopRepository::parse_item_id("001").unwrap().get(),
+        1
+    );
+    assert_eq!(
+        DiscordShopRepository::parse_purchase_id("001")
+            .unwrap()
+            .get(),
+        1
+    );
+    assert_eq!(
+        DiscordShopRepository::parse_role_id("001").unwrap().get(),
+        1
+    );
+    assert!(DiscordShopRepository::parse_item_id("9223372036854775808").is_err());
+    assert!(DiscordShopRepository::parse_purchase_id("9223372036854775808").is_err());
+    assert_eq!(
+        DiscordShopRepository::parse_role_id("18446744073709551615")
+            .unwrap()
+            .get(),
+        u64::MAX
+    );
+}
+
+#[test]
 fn 出品価格には正の整数だけを指定できる() {
     for price in ["0", "-1", "1.5", "9223372036854775808", " 500"] {
         assert!(
-            ListingDraft::new(
-                "1".into(),
-                actor(),
-                "資料".into(),
-                "".into(),
-                price,
-                attachment()
-            )
-            .is_err(),
+            DiscordShopRepository::item_details("資料".into(), "".into(), price,).is_err(),
             "{price}"
         );
     }
@@ -81,17 +123,7 @@ fn 出品価格には正の整数だけを指定できる() {
 
 #[test]
 fn 出品名は絵文字も文字数制限の対象になる() {
-    assert!(
-        ListingDraft::new(
-            "1".into(),
-            actor(),
-            "😀".repeat(129),
-            "".into(),
-            "500",
-            attachment()
-        )
-        .is_err()
-    );
+    assert!(DiscordShopRepository::item_details("😀".repeat(129), "".into(), "500",).is_err());
 }
 
 #[tokio::test]
@@ -100,26 +132,22 @@ async fn 下書きは作成した本人だけが同じ確認から操作でき�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    remember_draft(&data, draft("same-id"), "販売先").await;
+    data.remember_draft(draft("same-id"), "販売先").await;
 
     for (user, id) in [(201, "same-id"), (200, "different-id")] {
         assert!(
-            listing_action(
+            data.listing_action(
                 &http,
-                &data,
                 &component(&format!("content:draft:{id}:cancel"), user)
             )
             .await
             .is_err()
         );
     }
-    let (text, _) = listing_action(
-        &http,
-        &data,
-        &component("content:draft:same-id:cancel", 200),
-    )
-    .await
-    .unwrap();
+    let (text, _) = data
+        .listing_action(&http, &component("content:draft:same-id:cancel", 200))
+        .await
+        .unwrap();
     assert_eq!(text, "出品をキャンセルしました。");
     data.database.close().await.unwrap();
 }
@@ -130,12 +158,12 @@ async fn 同じ下書きの取消は一度だけ受け付ける() {
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    remember_draft(&data, draft("same-id"), "販売先").await;
+    data.remember_draft(draft("same-id"), "販売先").await;
     let cancel = component("content:draft:same-id:cancel", 200);
 
-    let (text, _) = listing_action(&http, &data, &cancel).await.unwrap();
+    let (text, _) = data.listing_action(&http, &cancel).await.unwrap();
     assert_eq!(text, "出品をキャンセルしました。");
-    assert!(listing_action(&http, &data, &cancel).await.is_err());
+    assert!(data.listing_action(&http, &cancel).await.is_err());
     data.database.close().await.unwrap();
 }
 
@@ -147,16 +175,12 @@ async fn 期限切れの下書きは確定できない() {
     let http = mock.http();
     let mut expired = draft("expired");
     expired.expires_at = Instant::now();
-    remember_draft(&data, expired, "販売先").await;
+    data.remember_draft(expired, "販売先").await;
 
     assert!(
-        listing_action(
-            &http,
-            &data,
-            &component("content:draft:expired:publish", 200)
-        )
-        .await
-        .is_err()
+        data.listing_action(&http, &component("content:draft:expired:publish", 200))
+            .await
+            .is_err()
     );
     assert!(mock.requests.lock().unwrap().is_empty());
     data.database.close().await.unwrap();
@@ -173,17 +197,17 @@ fn 添付には外部サイトや危険なファイル名や配送できない�
     ] {
         let mut file = attachment();
         file.url = url.into();
-        assert!(content::validate_attachment(&file).is_err());
+        assert!(DiscordShopRepository::validate_attachment(&file).is_err());
     }
     for size in [0, (MAX_CONTENT_BYTES + 1) as u32] {
         let mut file = attachment();
         file.size = size;
-        assert!(content::validate_attachment(&file).is_err());
+        assert!(DiscordShopRepository::validate_attachment(&file).is_err());
     }
     let mut file = attachment();
     file.filename = "../secret".into();
-    assert!(content::validate_attachment(&file).is_err());
-    assert!(content::validate_attachment(&attachment()).is_ok());
+    assert!(DiscordShopRepository::validate_attachment(&file).is_err());
+    assert!(DiscordShopRepository::validate_attachment(&attachment()).is_ok());
 }
 
 #[tokio::test]
@@ -194,7 +218,8 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
     let http = mock.http();
     let item = saved_item(&data).await;
     mock.fail_post.store(true, Ordering::Relaxed);
-    let (text, buttons) = publication_status(&http, &data, actor(), item.id())
+    let (text, buttons) = data
+        .publication_status(&http, actor(), item.id())
         .await
         .unwrap();
     assert!(text.contains("PublicationPending"));
@@ -211,7 +236,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
     read.commit().await.unwrap();
     mock.fail_post.store(false, Ordering::Relaxed);
     assert_eq!(
-        publication_status(&http, &data, actor(), item.id())
+        data.publication_status(&http, actor(), item.id())
             .await
             .unwrap()
             .0,
@@ -221,7 +246,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
         )
     );
     assert_eq!(
-        publication_status(&http, &data, actor(), item.id())
+        data.publication_status(&http, actor(), item.id())
             .await
             .unwrap()
             .0,
@@ -231,7 +256,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
         )
     );
     assert_eq!(mock.posts().len(), 2);
-    assert_eq!(data.shop.list(actor()).await.unwrap().len(), 1);
+    assert_eq!(data.sqlite_shop.list(actor()).await.unwrap().len(), 1);
     for body in mock.posts() {
         let payload: Value = serenity::json::from_str(&body).unwrap();
         assert!(
@@ -242,7 +267,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
         assert!(!body.contains("private-save-key"));
         assert!(!body.contains("original-url"));
         assert!(!body.contains("cdn.discordapp.com"));
-        assert!(!body.contains(&data.content_dir.to_string_lossy().to_string()));
+        assert!(!body.contains(&data.discord_shop.directory.to_string_lossy().to_string()));
         assert_eq!(payload["allowed_mentions"]["parse"], json!([]));
         assert_eq!(
             payload["components"][0]["components"][0]["custom_id"],
@@ -258,7 +283,7 @@ async fn 公開失敗後も同じ商品を再投稿し公開情報に非公開�
         .unwrap();
     assert_eq!((record.0, record.1.get(), record.2.get()), (1, 400, 900));
     assert!(
-        read.find_publication(crate::domain::GuildId::try_from(101).unwrap(), item.id())
+        read.find_publication(values::guild_id(101).unwrap(), item.id())
             .await
             .unwrap()
             .is_none()
@@ -274,20 +299,16 @@ async fn 商品を公開できるのは出品者本人で正しい販売先と�
     let mock = MockDiscord::new();
     let http = mock.http();
     let item = saved_item(&data).await;
-    let stranger = Actor::new(
-        actor().guild_id(),
-        crate::domain::UserId::try_from(201).unwrap(),
-        false,
-    );
+    let stranger = values::actor(actor().guild_id(), values::user_id(201).unwrap(), false);
     assert!(
-        publication_status(&http, &data, stranger, item.id())
+        data.publication_status(&http, stranger, item.id())
             .await
             .unwrap_err()
-            .is::<UseCaseError>()
+            .is::<RepositoryError>()
     );
     mock.wrong_channel.store(true, Ordering::Relaxed);
     assert!(
-        publication_status(&http, &data, actor(), item.id())
+        data.publication_status(&http, actor(), item.id())
             .await
             .unwrap()
             .0
@@ -296,7 +317,7 @@ async fn 商品を公開できるのは出品者本人で正しい販売先と�
     mock.wrong_channel.store(false, Ordering::Relaxed);
     mock.deny_embed.store(true, Ordering::Relaxed);
     assert!(
-        publication_status(&http, &data, actor(), item.id())
+        data.publication_status(&http, actor(), item.id())
             .await
             .unwrap()
             .0
@@ -314,7 +335,8 @@ async fn 公開記録の保存に失敗しても商品を増やさず同じ商�
     let http = mock.http();
     let item = saved_item(&data).await;
     data.database.clone().close().await.unwrap();
-    let (text, buttons) = publication_status(&http, &data, actor(), item.id())
+    let (text, buttons) = data
+        .publication_status(&http, actor(), item.id())
         .await
         .unwrap();
     assert!(text.contains(&format!("PublicationPending: 商品ID {}", item.id())));
@@ -326,7 +348,7 @@ async fn 公開記録の保存に失敗しても商品を増やさず同じ商�
     let raw = raw(&directory).await;
     raw.execute_unprepared("CREATE TRIGGER reject_publication BEFORE INSERT ON shop_item_publication BEGIN SELECT RAISE(ABORT,'injected'); END;").await.unwrap();
     assert!(
-        publication_status(&http, &data, actor(), item.id())
+        data.publication_status(&http, actor(), item.id())
             .await
             .unwrap()
             .0
@@ -335,13 +357,14 @@ async fn 公開記録の保存に失敗しても商品を増やさず同じ商�
     raw.execute_unprepared("DROP TRIGGER reject_publication")
         .await
         .unwrap();
-    publication_status(&http, &data, actor(), item.id())
+    data.publication_status(&http, actor(), item.id())
         .await
         .unwrap();
     assert_eq!(mock.posts().len(), 2);
-    assert_eq!(data.shop.list(actor()).await.unwrap().len(), 1);
+    assert_eq!(data.sqlite_shop.list(actor()).await.unwrap().len(), 1);
     assert!(
-        data.content_dir
+        data.discord_shop
+            .directory
             .join("content-100-200-private-save-key")
             .is_file()
     );
@@ -374,14 +397,17 @@ async fn 添付は実サイズを確認し上限超過と別の取得先への�
             .unwrap();
             let _ = stream.write_all(&body);
         });
-        let response = download_client()
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
             .unwrap()
             .get(format!("http://{address}/file"))
             .send()
             .await
             .unwrap();
         assert_eq!(response.status().as_u16(), status);
-        let result = content::read_attachment(response, expected).await;
+        let result = DiscordShopRepository::read_attachment(response, expected).await;
         if status == 200 && expected == 3 {
             assert_eq!(result.unwrap(), b"xxx");
         } else {
@@ -399,34 +425,23 @@ async fn 下書きの取消や別人の操作ではファイルも商品も保�
     let http = mock.http();
     data.drafts.lock().await.insert(200, draft("preview"));
     assert!(
-        listing_action(
-            &http,
-            &data,
-            &component("content:draft:preview:publish", 201)
-        )
-        .await
-        .is_err()
+        data.listing_action(&http, &component("content:draft:preview:publish", 201))
+            .await
+            .is_err()
     );
     assert!(data.drafts.lock().await.contains_key(&200));
-    let (text, _) = listing_action(
-        &http,
-        &data,
-        &component("content:draft:preview:cancel", 200),
-    )
-    .await
-    .unwrap();
+    let (text, _) = data
+        .listing_action(&http, &component("content:draft:preview:cancel", 200))
+        .await
+        .unwrap();
     assert!(text.contains("キャンセル"));
     assert!(
-        listing_action(
-            &http,
-            &data,
-            &component("content:draft:preview:publish", 200)
-        )
-        .await
-        .is_err()
+        data.listing_action(&http, &component("content:draft:preview:publish", 200))
+            .await
+            .is_err()
     );
-    assert!(data.shop.list(actor()).await.unwrap().is_empty());
-    assert!(!data.content_dir.exists());
+    assert!(data.sqlite_shop.list(actor()).await.unwrap().is_empty());
+    assert!(!data.discord_shop.directory.exists());
     assert!(mock.requests.lock().unwrap().is_empty());
     data.database.close().await.unwrap();
 }
@@ -442,13 +457,13 @@ async fn 再起動後も出品者を認証し同じ商品の同時再投稿で�
     let http = mock.http();
     let click = component(&format!("content:republish:100:{}", item.id()), 200);
     let (first, second) = tokio::join!(
-        listing_action(&http, &data, &click),
-        listing_action(&http, &data, &click)
+        data.listing_action(&http, &click),
+        data.listing_action(&http, &click)
     );
     assert!(first.unwrap().0.contains("公開表示へ反映しました"));
     assert!(second.unwrap().0.contains("公開表示へ反映しました"));
     assert_eq!(mock.posts().len(), 1);
-    assert_eq!(data.shop.list(actor()).await.unwrap().len(), 1);
+    assert_eq!(data.sqlite_shop.list(actor()).await.unwrap().len(), 1);
     assert!(data.drafts.lock().await.is_empty());
     data.database.close().await.unwrap();
 }

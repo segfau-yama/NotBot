@@ -1,8 +1,12 @@
 use crate::domain::*;
+use crate::infrastructure::sqlite::not::NotRepository as SqliteNotRepository;
+use crate::infrastructure::sqlite::shop::ShopRepository as SqliteShopRepository;
+use crate::infrastructure::types as values;
+use crate::infrastructure::{MoneyError, ValidationError};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, QueryResult,
-    RuntimeErr, SqliteTransactionMode, SqlxSqliteConnector, Statement, TransactionOptions,
-    TransactionTrait, raw_sql,
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, RuntimeErr,
+    SqliteTransactionMode, SqlxSqliteConnector, Statement, TransactionOptions, TransactionTrait,
+    raw_sql,
     sqlx::{
         self,
         sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
@@ -10,19 +14,7 @@ use sea_orm::{
 };
 use std::{fs, path::Path, time::Duration};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum DatabaseError {
-    #[error("データベースを利用できません")]
-    Unavailable,
-    #[error("データの書き込みが競合しました")]
-    Conflict,
-    #[error("データの形式または整合性が不正です")]
-    InvalidData,
-    #[error("読み取り専用セッションには追記できません")]
-    ReadOnly,
-    #[error("確定結果を確認できません。同じ依頼IDで結果を照合してください")]
-    OutcomeUnknown,
-}
+pub use crate::infrastructure::types::DatabaseError;
 
 pub(super) fn map_commit_error(error: DbErr) -> DatabaseError {
     match DatabaseError::from(error) {
@@ -243,7 +235,7 @@ impl SqliteSession {
             transaction
                 .query_one_raw(query)
                 .await?
-                .map(read_entry)
+                .map(SqliteNotRepository::read_entry)
                 .transpose()
         }
         .await;
@@ -304,7 +296,7 @@ impl SqliteSession {
             transaction.query_all_raw(raw_sql!(Sqlite,
                 "SELECT * FROM not_transaction
                  WHERE guild_id = {guild} AND user_id = {user} AND reason = 'PURCHASE' ORDER BY id DESC"
-            )).await?.into_iter().map(read_entry).collect()
+            )).await?.into_iter().map(SqliteNotRepository::read_entry).collect()
         }.await;
         self.finish_operation(transaction, result).await
     }
@@ -319,7 +311,7 @@ impl SqliteSession {
             transaction.query_all_raw(raw_sql!(Sqlite,
                 "SELECT p.* FROM not_transaction p JOIN shop_item i ON i.id = p.item_id
                  WHERE p.guild_id = {guild} AND p.reason = 'PURCHASE' AND i.kind = 'ROLE' ORDER BY p.id"
-            )).await?.into_iter().map(read_entry).collect()
+            )).await?.into_iter().map(SqliteNotRepository::read_entry).collect()
         }.await;
         self.finish_operation(transaction, result).await
     }
@@ -378,7 +370,7 @@ impl SqliteSession {
                 .await?
                 .ok_or(DatabaseError::InvalidData)?;
             let value: i64 = row.try_get("", "balance")?;
-            Balance::try_from(value).map_err(Into::into)
+            values::balance(value).map_err(Into::into)
         }
         .await;
         self.finish_operation(transaction, result).await
@@ -403,7 +395,10 @@ impl SqliteSession {
                 .map(|row| {
                     let user: String = row.try_get("", "user_id")?;
                     let balance: i64 = row.try_get("", "balance")?;
-                    Ok(UserBalance::new(user.parse()?, Balance::try_from(balance)?))
+                    Ok(UserBalance::new(
+                        values::parse_user_id(&user)?,
+                        values::balance(balance)?,
+                    ))
                 })
                 .collect()
         }
@@ -448,7 +443,7 @@ impl SqliteSession {
                 .await?
                 .ok_or(DatabaseError::InvalidData)?;
             let balance: i64 = row.try_get("", "balance")?;
-            Balance::try_from(balance).map_err(Into::into)
+            values::balance(balance).map_err(Into::into)
         }
         .await;
         self.finish_operation(transaction, result).await
@@ -482,7 +477,7 @@ impl SqliteSession {
                         entry.guild_id().to_string().into(),
                         entry.user_id().to_string().into(),
                         entry.amount().get().into(),
-                        entry.reason().code().into(),
+                        values::reason_code(entry.reason()).into(),
                         entry.event_key().into(),
                         item_id.into(),
                         sale_of.into(),
@@ -498,9 +493,9 @@ impl SqliteSession {
             }
             let id = i64::try_from(inserted.last_insert_id())
                 .ok()
-                .and_then(|id| LedgerEntryId::try_from(id).ok())
+                .and_then(|id| values::ledger_entry_id(id).ok())
                 .ok_or(DatabaseError::InvalidData)?;
-            LedgerEntry::try_new(
+            values::ledger_entry(
                 id,
                 entry.guild_id(),
                 entry.user_id(),
@@ -515,44 +510,6 @@ impl SqliteSession {
     }
 }
 
-fn read_entry(row: QueryResult) -> Result<LedgerEntry, DatabaseError> {
-    let id: i64 = row.try_get("", "id")?;
-    let guild: String = row.try_get("", "guild_id")?;
-    let user: String = row.try_get("", "user_id")?;
-    let amount: i64 = row.try_get("", "amount")?;
-    let code: String = row.try_get("", "reason")?;
-    let key: String = row.try_get("", "event_key")?;
-    let item: Option<i64> = row.try_get("", "item_id")?;
-    let sale: Option<i64> = row.try_get("", "sale_of")?;
-    let refund: Option<i64> = row.try_get("", "refund_of")?;
-    let reason = match (code.as_str(), item, sale, refund) {
-        ("MESSAGE", None, None, None) => LedgerReason::Message,
-        ("REACTION", None, None, None) => LedgerReason::Reaction,
-        ("REACTION_RECEIVED", None, None, None) => LedgerReason::ReactionReceived,
-        ("REPLY_RECEIVED", None, None, None) => LedgerReason::ReplyReceived,
-        ("TIP_SENT", None, None, None) => LedgerReason::TipSent,
-        ("TIP_RECEIVED", None, None, None) => LedgerReason::TipReceived,
-        ("TIMEOUT", None, None, None) => LedgerReason::Timeout,
-        ("ADJUSTMENT", None, None, None) => LedgerReason::Adjustment,
-        ("PURCHASE", Some(id), None, None) => LedgerReason::Purchase(ItemId::try_from(id)?),
-        ("SALE", None, Some(id), None) => LedgerReason::Sale(LedgerEntryId::try_from(id)?),
-        ("REFUND", None, None, Some(id)) => LedgerReason::Refund(LedgerEntryId::try_from(id)?),
-        ("SALE_REFUND", None, None, Some(id)) => {
-            LedgerReason::SaleRefund(LedgerEntryId::try_from(id)?)
-        }
-        _ => return Err(DatabaseError::InvalidData),
-    };
-    LedgerEntry::try_new(
-        LedgerEntryId::try_from(id)?,
-        guild.parse()?,
-        user.parse()?,
-        NotAmount::new(amount),
-        reason,
-        key,
-    )
-    .map_err(Into::into)
-}
-
 const CURRENT_ITEM_QUERY: &str = "SELECT i.*, f.key AS file_key, f.filename, f.size_bytes
     FROM current_shop_item AS i
     LEFT JOIN content_file AS f ON i.kind = 'CONTENT' AND f.key = i.target";
@@ -564,7 +521,7 @@ impl SqliteSession {
             transaction
                 .query_one_raw(query)
                 .await?
-                .map(read_item)
+                .map(SqliteShopRepository::read_item)
                 .transpose()
         }
         .await;
@@ -632,7 +589,7 @@ impl SqliteSession {
                 "INSERT INTO shop_item (guild_id, seller_id, kind, target) VALUES ({guild}, {seller}, 'ROLE', {target})"
             )).await?;
             let id = i64::try_from(inserted.last_insert_id()).map_err(|_| DatabaseError::InvalidData)?;
-            let item = ShopItem::try_new(ItemId::try_from(id)?, actor.guild_id(), actor.user_id(), ItemTarget::Role(role), details, 1, false)?;
+            let item = values::shop_item(values::item_id(id)?, actor.guild_id(), actor.user_id(), ItemTarget::Role(role), details, 1, false)?;
             insert_revision(&transaction, &item).await?;
             Ok(item)
         }.await;
@@ -672,7 +629,7 @@ impl SqliteSession {
                 DbBackend::Sqlite,
                 format!("{CURRENT_ITEM_QUERY} WHERE i.guild_id = ? AND i.deleted_at IS NULL ORDER BY i.id"),
                 [guild_id.to_string().into()],
-            )).await?.into_iter().map(read_item).collect()
+            )).await?.into_iter().map(SqliteShopRepository::read_item).collect()
         }.await;
         self.finish_operation(transaction, result).await
     }
@@ -701,8 +658,8 @@ impl SqliteSession {
                 [actor.guild_id().to_string().into(), actor.user_id().to_string().into(), file.key().into()],
             )).await?;
             let id = i64::try_from(inserted.last_insert_id()).ok()
-                .and_then(|id| ItemId::try_from(id).ok()).ok_or(DatabaseError::InvalidData)?;
-            let item = ShopItem::try_new(id, actor.guild_id(), actor.user_id(), item.target().clone(), item.details().clone(), 1, false)?;
+                .and_then(|id| values::item_id(id).ok()).ok_or(DatabaseError::InvalidData)?;
+            let item = values::shop_item(id, actor.guild_id(), actor.user_id(), item.target().clone(), item.details().clone(), 1, false)?;
             insert_revision(&transaction, &item).await?;
             Ok(item)
         }.await;
@@ -749,7 +706,11 @@ impl SqliteSession {
                     if revision <= 0 {
                         return Err(DatabaseError::InvalidData);
                     }
-                    Ok((revision, channel.parse()?, message.parse()?))
+                    Ok((
+                        revision,
+                        values::parse_channel_id(&channel)?,
+                        values::parse_message_id(&message)?,
+                    ))
                 })
                 .transpose()
         }
@@ -799,41 +760,6 @@ async fn insert_revision(
     Ok(())
 }
 
-fn read_item(row: QueryResult) -> Result<ShopItem, DatabaseError> {
-    let id: i64 = row.try_get("", "id")?;
-    let guild: String = row.try_get("", "guild_id")?;
-    let seller: String = row.try_get("", "seller_id")?;
-    let kind: String = row.try_get("", "kind")?;
-    let target: String = row.try_get("", "target")?;
-    let revision: i64 = row.try_get("", "revision")?;
-    let name: String = row.try_get("", "name")?;
-    let description: String = row.try_get("", "description")?;
-    let price: i64 = row.try_get("", "price")?;
-    let deleted: Option<String> = row.try_get("", "deleted_at")?;
-    let target = match kind.as_str() {
-        "ROLE" => ItemTarget::Role(target.parse()?),
-        "CONTENT" => {
-            let key: String = row.try_get("", "file_key")?;
-            let filename: String = row.try_get("", "filename")?;
-            let size: i64 = row.try_get("", "size_bytes")?;
-            let size = u64::try_from(size).map_err(|_| DatabaseError::InvalidData)?;
-            ItemTarget::Content(ContentFile::try_new(key, filename, size)?)
-        }
-        _ => return Err(DatabaseError::InvalidData),
-    };
-    let details = ItemDetails::try_new(name, description, Price::try_from(price)?)?;
-    ShopItem::try_new(
-        ItemId::try_from(id)?,
-        guild.parse()?,
-        seller.parse()?,
-        target,
-        details,
-        revision,
-        deleted.is_some(),
-    )
-    .map_err(Into::into)
-}
-
 impl SqliteSession {
     pub(super) async fn count_voice_rewards(
         &mut self,
@@ -880,9 +806,9 @@ impl SqliteSession {
                     let user: String = row.try_get("", "user_id")?;
                     let entry: Option<i64> = row.try_get("", "entry_id")?;
                     Ok((
-                        user.parse()?,
+                        values::parse_user_id(&user)?,
                         row.try_get("", "reason")?,
-                        entry.map(LedgerEntryId::try_from).transpose()?,
+                        entry.map(values::ledger_entry_id).transpose()?,
                     ))
                 })
                 .transpose()
@@ -900,7 +826,7 @@ impl SqliteSession {
         let transaction = self.take_transaction()?;
         let guild = actor.guild_id().to_string();
         let user = actor.user_id().to_string();
-        let reason = reason.code();
+        let reason = values::reason_code(reason);
         let day_start = (now + 32_400_000) / 86_400_000 * 86_400_000 - 32_400_000;
         let day_end = day_start + 86_400_000;
         let result = async {
@@ -931,7 +857,7 @@ impl SqliteSession {
         let transaction = self.take_transaction()?;
         let guild = actor.guild_id().to_string();
         let user = actor.user_id().to_string();
-        let reason = reason.code();
+        let reason = values::reason_code(reason);
         let entry = entry.map(LedgerEntryId::get);
         let result = async {
             transaction.execute_raw(raw_sql!(Sqlite,

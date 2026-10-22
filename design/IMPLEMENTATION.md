@@ -7,7 +7,7 @@ P00〜P13と通話報酬は実装・自動検証済み。Discordでの確認は�
 | 工程 | できるようになること | 前提 | 状態 |
 |---|---|---|---|
 | P00 | Rustのビルド・設定読込 | なし | 完了 |
-| P01 | 有効な金額・商品・実行者の型 | P00 | 完了 |
+| P01 | Repositoryが検証した金額・商品・実行者の型 | P00 | 完了 |
 | P02 | SQLiteの初期化・追記・残高VIEW・取引境界 | P01 | 完了 |
 | P03 | 残高・ランキング・管理者の残高調整 | P02 | 完了 |
 | P04 | ファイル保持と商品の作成・変更・削除 | P02 | 完了 |
@@ -24,6 +24,10 @@ P00〜P13と通話報酬は実装・自動検証済み。Discordでの確認は�
 | 構成の簡素化 | ファイル統合・テスト配置・補助関数・設計書の整理 | 既存実装 | 完了 |
 | 仕様ベースのテスト | 日本語の仕様名・関心事の分離・テストに基づく実装整理 | 既存テスト | 完了 |
 | mod.rsの整理 | 全3ファイルをモジュール宣言・再公開だけにする | 既存実装 | 完了 |
+| Repositoryへの集約 | Discord／SQLiteのNotRepository・ShopRepository、データ保持だけのドメイン | 既存実装 | 完了 |
+| Repositoryの独立 | 相互参照の廃止・domain値の受け渡し・commands／eventsへの対話処理の移動 | Repositoryへの集約 | 完了 |
+| コマンドのDB呼出し | SQLite参照名の明示・商品変更と削除と購入一覧をコマンドから直接呼ぶ | Repositoryの独立 | 完了 |
+| domainの保護と入力変換 | 全フィールドの非公開化・入力変換をDiscord Repositoryへ集約 | コマンドのDB呼出し | 完了 |
 
 ## 工程ごとの確認点
 
@@ -69,5 +73,23 @@ env -u DISCORD_TOKEN cargo test --locked --all-targets
 ロール売上の廃止（2026-10-20）：購入者の減算だけを記録し、返金も購入者へ元の額を戻す。出品者本人の購入・確認DMも減算後の残高に統一した。売上なしの残高テストの失敗を確認して実装し、残高上限・本人の確認表示も失敗から成功へ修正した。旧売上付き履歴は書き換えず、復元・返金を検証した。全98テスト（Discord 34・ドメイン15・実SQLite 49）、fmt・check・clippy（警告をエラー扱い）・差分チェックが成功。依存・ファイル・スキーマの追加なし。次はREADMEのロール購入・返金の実機確認。
 
 mod.rsの整理（2026-10-20）：共通型を `infrastructure/types.rs`、Discordの起動・共有データを `discord/bot.rs`、SQLiteの実装を `sqlite/database.rs` へ移した。全3か所の `mod.rs` は宣言と再公開だけとし、既存の公開パスを保持した。移動前後の全98テスト、fmt・check・clippy（警告をエラー扱い）・差分チェックが成功。テスト・依存・SQL・業務処理の変更なし。次は引き続きREADMEの実機確認。
+
+Repositoryへの集約（2026-10-22）：DiscordとSQLiteにそれぞれ `NotRepository`・`ShopRepository` を置いた。ドメインはデータ型と読み取りだけにし、コンストラクタ・型変換・検証・金額計算は各Repositoryへ移した。各Repositoryは検証済みのドメインデータを入出力する。受け渡しの呼び出し元は、後述のRepositoryの独立でcommands／eventsへ移した。購入・返金の結果はSQLite ShopRepositoryで元取引・本人・ギルド・金額・売上の有無を照合し、新規処理のCOMMIT前と履歴復元で同じ検証を使う。操作のエラーを `RepositoryError`、返金結果を `RefundResult` へ改名した。商品版の入力を残高として扱う処理も修正した。
+
+変更前98件の成功を確認してから移行した。購入結果と商品版入力の仕様テストの失敗を確認し、実装後に成功させた。既存98件を維持し、結果の不一致拒否・現在価格変更後の元額照合・商品版入力の4件を追加。最終確認は全102件（Discord 35・Repositoryの値と結果18・実SQLite 49）、fmt・check・clippy（警告をエラー扱い）・差分チェックが成功。値のテストは `tests/repository_values.rs`、DiscordのNOTテストは `tests/discord/not.rs` へ改名した。ドメインに変換・検証・計算・インフラ依存がないこと、全mod.rsが宣言と再公開だけであること、購入・返金結果の生成先がSQLite ShopRepositoryだけであることも確認した。依存・SQL・スキーマ・金額仕様の変更なし。次はREADMEの実機確認。
+
+Repositoryの独立（2026-10-22）：Discord RepositoryからSQLite Repositoryの保持・呼び出しを除いた。commands／eventsが各Repositoryを別々に呼び、Actor・ItemDetails・StoredContent・購入結果などのドメイン値を受け渡す。ドメインに処理の中継や検証は追加していない。Discordの返信・対話・ロール操作をcommands、投稿・リアクション・通話の受付をeventsへ戻した。共通の値変換はインフラ内で再利用し、公開記録のDB操作はSQLite ShopRepositoryへ移した。テストは `tests/discord/` と `tests/sqlite/{values,flows}.rs` に配置し、非公開処理のテストを実装側から読み込む。
+
+変更前後で既存102件（Discord 35・値変換と結果18・実SQLite 49）の成功を確認し、テスト名・仕様を維持した。fmt・check・clippy（警告をエラー扱い）・差分チェックも成功。Repository同士の参照とcommandsのDBセッション操作がないこと、ドメインにインフラ依存がないこと、全mod.rsが宣言と再公開だけであることを確認した。実装ファイル数・依存・SQL・スキーマ・金額仕様の追加変更はない。次はREADMEの実機確認。
+
+コマンドのDB呼出し（2026-10-22）：Dataの参照名を `sqlite_not`・`sqlite_shop`・`discord_shop` に変更した。商品変更・削除はコマンドからSQLite Repositoryを直接呼び、委譲先の `update_item`・`delete_item` を削除した。購入一覧はコマンドで取得した `PurchaseResult` を共通の表示処理へ渡す。出品の入力変換はDiscord Repositoryを直接呼び、下書きへ `ItemDetails` を保持する。保存は従来どおり「出品する」の確定時に `sqlite_shop.create` を使う。プレビュー・取消・期限切れで保存しない仕様と、商品公開ロック・取引の一括確定を維持した。
+
+変更前後の既存102件が成功。テスト名を維持し、商品管理のシナリオはSQLite Repositoryの操作と公開表示を照合する形へ更新した。fmt・check・clippy（警告をエラー扱い）・差分チェックも成功。ドメインとSQLite実装・SQL・依存・金額仕様の変更や、新しい層・ファイルの追加はない。次はREADMEの実機確認。
+
+domainの保護と入力変換（2026-10-22）：domainの全フィールドをprivateへ変更し、crate内の生成メソッドは値の格納だけとした。既存の変換・検証はインフラに維持し、購入・返金の結果もSQLite Repositoryの整合性チェック後に生成する。commandsの増減額・ギルド／商品／購入／ロールID・公開記録のID変換をDiscord Repositoryへ移した。commandsは戻ったドメイン値をSQLite Repositoryへ渡し、SDKによる送信・返信を担当する。
+
+既存102件の成功を確認してから変更した。同じcrateの別モジュールから金額・権限・購入確認を直接書き換えるコンパイル拒否のテストを追加し、修正前の失敗と非公開化後の成功を確認した。増減額の符号と整数上下限、識別子の正数・十進表記・上限の仕様テストも追加した。
+
+最終確認は全105件（既存102件と追加3件）が成功。fmt・check・clippy（警告をエラー扱い）・差分チェックも成功。domainに可変参照・検証・計算・インフラ依存がなく、commandsが共通変換関数やdomainの生成メソッドを直接呼ばないことを確認した。既存の取引・残高・出品・購入・返金・配送の検証を維持した。層・ファイル・依存・SQL・スキーマの追加変更はない。次はREADMEの実機確認。
 
 実Discordでのコマンド反映、DM・フォーム・添付配送、権限変更、投稿・リアクション・通話報酬、ロール復旧は未確認。実ストレージ障害・電源断も未確認。

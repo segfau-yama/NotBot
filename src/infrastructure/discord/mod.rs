@@ -2,7 +2,8 @@ mod bot;
 pub mod commands;
 pub mod content;
 mod events;
-mod services;
+pub mod not;
+pub mod shop;
 
 pub use bot::{Context, Data, run};
 

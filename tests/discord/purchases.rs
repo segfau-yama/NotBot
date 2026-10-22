@@ -1,4 +1,6 @@
+use crate::infrastructure::discord::Data;
 use crate::infrastructure::discord::test_support::actor;
+use crate::infrastructure::types as values;
 use std::{fs, sync::atomic::Ordering, time::Duration};
 
 use sea_orm::ConnectionTrait;
@@ -6,28 +8,24 @@ use serenity::json::to_value;
 
 use super::*;
 use crate::{
-    domain::{Balance, ItemDetails, Price, ShopItem},
+    domain::ShopItem,
     infrastructure::discord::{events, test_support::*},
 };
 
 fn buyer() -> Actor {
-    Actor::new(
-        actor().guild_id(),
-        crate::domain::UserId::try_from(201).unwrap(),
-        false,
-    )
+    values::actor(actor().guild_id(), values::user_id(201).unwrap(), false)
 }
 
 async fn scenario() -> (TestDirectory, Data, ShopItem) {
     let directory = TestDirectory::new();
     let data = setup(&directory).await;
     let item = saved_item(&data).await;
-    let admin = Actor::new(actor().guild_id(), actor().user_id(), true);
-    data.not
+    let admin = values::actor(actor().guild_id(), actor().user_id(), true);
+    data.sqlite_not
         .adjust_balance(
             admin,
             buyer().user_id(),
-            Balance::try_from(1200).unwrap(),
+            values::balance(1200).unwrap(),
             "fund",
         )
         .await
@@ -39,12 +37,14 @@ async fn offer(http: &Http, data: &Data, item: &ShopItem, request: u64) -> Resul
     let mut click = component(&format!("content:buy:100:{}", item.id()), 201);
     click.guild_id = Some(GuildId::new(100));
     click.id = InteractionId::new(request);
-    purchase_action(http, data, &click, SystemTime::now()).await?;
+    data.purchase_action(http, &click, SystemTime::now())
+        .await?;
     Ok(format!("100-{request}"))
 }
 
 async fn act(http: &Http, data: &Data, id: &str) -> Result<(String, Vec<CreateActionRow>), Error> {
-    purchase_action(http, data, &component(id, 201), SystemTime::now()).await
+    data.purchase_action(http, &component(id, 201), SystemTime::now())
+        .await
 }
 
 #[tokio::test]
@@ -79,21 +79,30 @@ async fn 購入確認は先に応答し取消では課金せず再操作や再�
             .await
             .is_err()
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        1200
+    );
 
     let id = offer(&http, &data, &item, 911).await.unwrap();
     let yes = format!("content:confirm:{id}:yes");
     assert!(
-        purchase_action(&http, &data, &component(&yes, 202), SystemTime::now())
+        data.purchase_action(&http, &component(&yes, 202), SystemTime::now())
             .await
             .is_err()
     );
     assert!(data.confirmations.lock().await.contains_key(&id));
     let (first, second) = tokio::join!(act(&http, &data, &yes), act(&http, &data, &yes));
     assert!(first.is_ok() || second.is_ok());
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 500);
-    data.shop
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
+    assert_eq!(
+        data.sqlite_not.get_balance(actor()).await.unwrap().get(),
+        500
+    );
+    data.sqlite_shop
         .delete(actor(), item.id(), item.revision())
         .await
         .unwrap();
@@ -107,16 +116,24 @@ async fn 購入確認は先に応答し取消では課金せず再操作や再�
             .0
             .contains("送信しました")
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
-    let purchase = data.shop.list_purchases(buyer()).await.unwrap().remove(0);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
+    let purchase = data
+        .sqlite_shop
+        .list_purchases(buyer())
+        .await
+        .unwrap()
+        .remove(0);
     let resend = format!("content:resend:100:{}", purchase.buyer().id());
     assert!(
-        purchase_action(&http, &data, &component(&resend, 202), SystemTime::now())
+        data.purchase_action(&http, &component(&resend, 202), SystemTime::now())
             .await
             .is_err()
     );
-    let admin = Actor::new(actor().guild_id(), actor().user_id(), true);
-    data.shop
+    let admin = values::actor(actor().guild_id(), actor().user_id(), true);
+    data.sqlite_shop
         .refund(admin, purchase.buyer().id(), "refund")
         .await
         .unwrap();
@@ -124,7 +141,10 @@ async fn 購入確認は先に応答し取消では課金せず再操作や再�
     assert!(act(&http, &data, &resend).await.is_err());
     assert!(act(&http, &data, &yes).await.is_err());
     assert_eq!(mock.posts().len(), posts);
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        1200
+    );
     data.database.close().await.unwrap();
 }
 
@@ -142,7 +162,7 @@ async fn 購入確認の送信や所属やファイルの確認ができない�
     let ItemTarget::Content(file) = item.target() else {
         unreachable!()
     };
-    let path = data.content_dir.join(file.key());
+    let path = data.discord_shop.directory.join(file.key());
     let saved = path.with_extension("backup");
     fs::rename(&path, &saved).unwrap();
     assert!(
@@ -165,25 +185,33 @@ async fn 購入確認の送信や所属やファイルの確認ができない�
     let mut click = component(&format!("content:confirm:{id}:yes"), 201);
     click.attachment_size_limit = 2;
     assert!(
-        purchase_action(&http, &data, &click, SystemTime::now())
+        data.purchase_action(&http, &click, SystemTime::now())
             .await
             .is_err()
     );
 
     let id = offer(&http, &data, &item, 924).await.unwrap();
     assert!(
-        purchase_action(
+        data.purchase_action(
             &http,
-            &data,
             &component(&format!("content:confirm:{id}:yes"), 201),
             SystemTime::now() + Duration::from_secs(301)
         )
         .await
         .is_err()
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 0);
-    assert!(data.shop.list_purchases(buyer()).await.unwrap().is_empty());
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        1200
+    );
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 0);
+    assert!(
+        data.sqlite_shop
+            .list_purchases(buyer())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     data.database.close().await.unwrap();
 }
 
@@ -203,7 +231,10 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
         .as_str()
         .unwrap()
         .to_owned();
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
     data.database.close().await.unwrap();
 
     let data = setup(&directory).await;
@@ -215,23 +246,26 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
             .0
             .contains("送信しました")
     );
-    let (text, buttons) = prepare_purchase(
-        &http,
-        &data,
-        buyer(),
-        item.id(),
-        "100-931".into(),
-        SystemTime::now(),
-    )
-    .await
-    .unwrap();
+    let (text, buttons) = data
+        .prepare_purchase(
+            &http,
+            buyer(),
+            item.id(),
+            "100-931".into(),
+            SystemTime::now(),
+        )
+        .await
+        .unwrap();
     assert!(text.contains("購入済み"));
     assert_eq!(
         to_value(&buttons).unwrap()[0]["components"][0]["custom_id"],
         resend
     );
     assert!(data.confirmations.lock().await.is_empty());
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 700);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        700
+    );
     let files: Vec<_> = mock
         .posts()
         .into_iter()
@@ -243,18 +277,18 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
         assert!(!body.contains("private-save-key"));
     }
     for request in 0..6 {
-        let stored = content::store_content(
-            &data.content_dir,
-            actor(),
-            &format!("page-{request}"),
-            "a.txt",
-            &b"x"[..],
-        )
-        .unwrap();
-        let details = ItemDetails::try_new("商品", "", Price::try_from(1).unwrap()).unwrap();
-        let item = data.shop.create(actor(), details, stored).await.unwrap();
+        let stored = data
+            .discord_shop
+            .store_content(actor(), &format!("page-{request}"), "a.txt", &b"x"[..])
+            .unwrap();
+        let details = values::item_details("商品", "", values::price(1).unwrap()).unwrap();
+        let item = data
+            .sqlite_shop
+            .create(actor(), details, stored)
+            .await
+            .unwrap();
         let quote = data
-            .shop
+            .sqlite_shop
             .prepare_purchase(
                 buyer(),
                 item.id(),
@@ -263,12 +297,15 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
             )
             .await
             .unwrap();
-        data.shop
+        data.sqlite_shop
             .purchase(buyer(), &quote, SystemTime::now())
             .await
             .unwrap();
     }
-    let (text, buttons) = list_purchases(&http, &data, buyer(), 0).await.unwrap();
+    let purchases = data.sqlite_shop.list_purchases(buyer()).await.unwrap();
+    let (text, buttons) = Data::purchase_page(&http, buyer(), &purchases, 0)
+        .await
+        .unwrap();
     assert!(text.starts_with("サーバー: テストサーバー\n購入一覧"));
     assert!(text.contains("1/2"));
     assert_eq!(
@@ -282,7 +319,10 @@ async fn 配送失敗後は購入一覧から無料で再送でき保存先は�
     assert!(text.starts_with("サーバー: テストサーバー\n購入一覧"));
     assert!(text.contains("2/2"));
     assert!(!text.contains("content-"));
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 694);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        694
+    );
     data.database.close().await.unwrap();
 }
 
@@ -310,8 +350,11 @@ async fn 決済に失敗しても残高を変えず同じ購入確認から結�
             .await
             .is_err()
     );
-    assert_eq!(data.not.get_balance(buyer()).await.unwrap().get(), 1200);
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 0);
+    assert_eq!(
+        data.sqlite_not.get_balance(buyer()).await.unwrap().get(),
+        1200
+    );
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 0);
     raw.close().await.unwrap();
     data.database.close().await.unwrap();
 }

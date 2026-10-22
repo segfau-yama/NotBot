@@ -25,54 +25,50 @@ async fn 通話報酬は参加中の一分ごとに付与し移動では継続�
     let joined = Instant::now();
     let wall = UNIX_EPOCH + Duration::from_secs(100_000);
     let mut member = state(200);
-    update_voice(&data, guild, &member, joined).await;
-    tick_voice(
+    data.update_voice(guild, &member, joined).await;
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_millis(59_999),
         wall + Duration::from_millis(59_999),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 0);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 0);
     assert!(mock.requests.lock().unwrap().is_empty());
-    tick_voice(
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(60),
         wall + Duration::from_secs(60),
     )
     .await;
-    tick_voice(
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(60),
         wall + Duration::from_secs(60),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 1);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 1);
     member.channel_id = Some(ChannelId::new(501));
     member.self_mute = true;
-    update_voice(&data, guild, &member, joined + Duration::from_secs(61)).await;
-    tick_voice(
+    data.update_voice(guild, &member, joined + Duration::from_secs(61))
+        .await;
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_millis(119_999),
         wall + Duration::from_millis(119_999),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 1);
-    tick_voice(
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 1);
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(120),
         wall + Duration::from_secs(120),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 2);
-    update_voice(&data, guild, &state(42), joined + Duration::from_secs(120)).await;
-    tick_voice(
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 2);
+    data.update_voice(guild, &state(42), joined + Duration::from_secs(120))
+        .await;
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(180),
         wall + Duration::from_secs(180),
     )
@@ -84,40 +80,38 @@ async fn 通話報酬は参加中の一分ごとに付与し移動では継続�
             .await
             .contains_key(&(guild, UserId::new(42)))
     );
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 3);
     member.channel_id = None;
-    update_voice(&data, guild, &member, joined + Duration::from_secs(181)).await;
-    tick_voice(
+    data.update_voice(guild, &member, joined + Duration::from_secs(181))
+        .await;
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(240),
         wall + Duration::from_secs(240),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 3);
     member.channel_id = Some(ChannelId::new(500));
-    update_voice(&data, guild, &member, joined + Duration::from_secs(241)).await;
-    tick_voice(
+    data.update_voice(guild, &member, joined + Duration::from_secs(241))
+        .await;
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(300),
         wall + Duration::from_secs(300),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 3);
-    tick_voice(
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 3);
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(301),
         wall + Duration::from_secs(301),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 4);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 4);
     let connection = raw(&directory).await;
     connection.execute_unprepared("CREATE TRIGGER reject_voice BEFORE INSERT ON not_transaction WHEN NEW.event_key LIKE 'voice:%' BEGIN SELECT RAISE(ABORT, 'injected'); END;").await.unwrap();
-    tick_voice(
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(361),
         wall + Duration::from_secs(361),
     )
@@ -130,25 +124,24 @@ async fn 通話報酬は参加中の一分ごとに付与し移動では継続�
         .unwrap()
         .pending
         .unwrap();
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 4);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 4);
     connection
         .execute_unprepared("DROP TRIGGER reject_voice")
         .await
         .unwrap();
     // DBでは確定し、呼出し側だけ結果を失った状態から、翌分も同じキーで復元する。
-    data.not
+    data.sqlite_not
         .grant_voice_reward(actor(), pending)
         .await
         .unwrap()
         .unwrap();
-    tick_voice(
+    data.tick_voice(
         &http,
-        &data,
         joined + Duration::from_secs(421),
         wall + Duration::from_secs(421),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 5);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 5);
     assert!(
         data.voice
             .lock()
@@ -163,30 +156,28 @@ async fn 通話報酬は参加中の一分ごとに付与し移動では継続�
     let data = setup(&directory).await;
     let restart = joined + Duration::from_secs(3600);
     let states = HashMap::from([(member.user_id, member)]);
-    seed_voice(&data, guild, &states, restart).await;
-    tick_voice(
+    data.seed_voice(guild, &states, restart).await;
+    data.tick_voice(
         &http,
-        &data,
         restart + Duration::from_secs(59),
         wall + Duration::from_secs(3659),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 5);
-    tick_voice(
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 5);
+    data.tick_voice(
         &http,
-        &data,
         restart + Duration::from_secs(60),
         wall + Duration::from_secs(3660),
     )
     .await;
-    assert_eq!(data.not.get_balance(actor()).await.unwrap().get(), 6);
+    assert_eq!(data.sqlite_not.get_balance(actor()).await.unwrap().get(), 6);
     let cache = Cache::default();
     let mut cached_guild = Guild::default();
     cached_guild.id = guild;
     cached_guild.voice_states = states;
     let mut created: GuildCreateEvent = from_value(to_value(cached_guild).unwrap()).unwrap();
     cache.update(&mut created);
-    retain_connected(&cache, &data).await;
+    data.retain_connected(&cache).await;
     assert!(
         data.voice
             .lock()
@@ -198,7 +189,7 @@ async fn 通話報酬は参加中の一分ごとに付与し移動では継続�
     let mut left: VoiceStateUpdateEvent = from_value(to_value(left).unwrap()).unwrap();
     cache.update(&mut left);
     // 入退室ハンドラが遅れても、SDKの最新状態で退出済みを除外する。
-    retain_connected(&cache, &data).await;
+    data.retain_connected(&cache).await;
     assert!(data.voice.lock().await.is_empty());
     assert!(mock.posts().is_empty());
     data.database.close().await.unwrap();

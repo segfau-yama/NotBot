@@ -77,11 +77,11 @@ DM候補にはBotと本人の所属を確認できたサーバーだけを表示
 | DM候補がBot・本人の所属先に限定され、調整候補には管理可能なサーバーだけが出る。権限剥奪・退会後の実行も拒否される | 未実施 |
 | Ctrl-C／SIGTERMでGatewayが終了し、再起動後も残高が保持される | 未実施 |
 
-参考の[JadeMusicの起動処理](https://github.com/segfau-yama/JadeMusic/blob/main/src/main.rs)でSerenityクライアントとグローバル登録の流れを確認しました。同じPoiseフレームワークを採用し、Discord側を `commands.rs`・`events.rs`・`services.rs` に分けています。コマンドの定義・引数解析・返信をPoiseに任せ、所属・権限のREST確認にはSerenityを使います。
+参考の[JadeMusicの起動処理](https://github.com/segfau-yama/JadeMusic/blob/main/src/main.rs)でSerenityクライアントとグローバル登録の流れを確認しました。同じPoiseフレームワークを採用し、Discord側を `commands.rs`・`events.rs`・`not.rs`・`shop.rs` に分けています。コマンドの定義・引数解析・返信をPoiseに任せ、所属・権限のREST確認にはSerenityを使います。
 
 ## 残高操作
 
-`infrastructure::sqlite::not::NotUseCase::new(database)` に `SqliteDatabaseAccess` を渡して使います。
+`infrastructure::sqlite::not::NotRepository::new(database)` に `SqliteDatabaseAccess` を渡して使います。
 
 - `get_balance(actor)`：実行者の対象ギルドでの残高。履歴がなければ0。
 - `get_ranking(actor, limit)`：対象ギルドの残高降順。同額は保存されたユーザーID文字列の昇順。履歴のないユーザーは含めず、件数0は空の一覧。
@@ -90,7 +90,7 @@ DM候補にはBotと本人の所属を確認できたサーバーだけを表示
 
 調整の再試行では同じ依頼IDを使います。同じギルド・対象ユーザー・増減額（`adjust_balance` は目標残高）なら元の取引を返し、追加反映しません。対象や金額を変えて同じIDを使うと `RequestConflict` になります。後から別の取引があっても、過去の依頼を再反映しません。
 
-`Actor` は呼び出し側が認証済みの所属・権限から生成する契約です。`infrastructure::discord` がDiscordのREST照会結果から生成し、上記コマンドをユースケースへ接続します。
+`Actor` はRepositoryが認証済みの所属・権限から生成する契約です。`infrastructure::discord` がDiscordのREST照会結果から生成し、上記コマンドをSQLite Repositoryへ接続します。
 
 ## 報酬・罰則・NOT譲渡（P12）
 
@@ -102,7 +102,7 @@ DM候補にはBotと本人の所属を確認できたサーバーだけを表示
 
 罰則として減算する場合も、管理者が `/not adjust` に負の増減額を指定します。残高50に `-100` を指定すると拒否し、`-50` なら0になります。`transfer` は本人の残高から、同じサーバーのメンバーへ100・500・1,000 NOTを譲渡します。本人・対象の所属をRESTで照合し、自己譲渡・残高不足・受取側の残高上限超過を拒否します。BotからDiscordのタイムアウト処分を実行するコマンドではありません。
 
-`NotUseCase.adjust_amount(actor, user_id, amount, request_id)` は取引を1行、`transfer(actor, recipient, amount, request_id)` は送信・受信の順で `(LedgerEntry, LedgerEntry)` を返します。どちらも同じImmediateトランザクション内で依頼の重複と残高を照合し、譲渡は送受信の2行を一括確定します。DBスキーマや依存ライブラリは追加していません。
+`NotRepository.adjust_amount(actor, user_id, amount, request_id)` は取引を1行、`transfer(actor, recipient, amount, request_id)` は送信・受信の順で `(LedgerEntry, LedgerEntry)` を返します。どちらも同じImmediateトランザクション内で依頼の重複と残高を照合し、譲渡は送受信の2行を一括確定します。DBスキーマや依存ライブラリは追加していません。
 
 増減指定のキーは `adjust-amount:{request_id}`、譲渡は `transfer:{request_id}:sent`・`:received`。DiscordではInteraction IDを依頼IDとし、同じ依頼の再処理・再起動後の再試行では元の取引を返します。依頼IDを別の対象・金額に使うと拒否し、片側しかない譲渡履歴は不正データとして扱います。ログの `adjustment_requested`・`transfer_requested` は依頼の受付であり、決済成功の証拠ではありません。結果不明のときは新しいコマンドで再送せず、管理者が `request=` とイベントキーで履歴を照合してください。旧 `penalty:`・`adjust:` の取引履歴はそのまま保持します。
 
@@ -123,11 +123,11 @@ DM・Bot・Webhook・システム投稿・自己リアクション・自己返�
 
 通話報酬は**サーバー・ユーザーごとに1日合計5時間分、最大300 NOT**です。日本時間00:00で上限をリセットし、再参加・チャンネル移動・Bot再起動でも当日の付与数を保持します。Botは通話に参加する必要がありません。Bot以外の参加者が対象で、1人だけの通話・ミュート中も含みます。退出時の1分未満は切り捨て、Bot停止・Gateway切断・所属確認失敗中の時間は遡って付与しません。起動・再接続時点ですでに通話にいる人も、その時点から計測します。日付は付与対象の1分を判定した時刻を使います。
 
-`NotUseCase.grant_reward(actor, reason, request_id, now)` は付与済みの取引を `Some(LedgerEntry)`、制限による見送りを `None` で返します。キーは `reward:{理由コード}:{元メッセージID}`、リアクションの場合は `reward:{理由コード}:{元メッセージID}-{リアクションした人のID}` です。絵文字はキーに含めず、取り外し・付け直し・別絵文字でも同じ結果を返します。日次上限・間隔・残高上限・処理済み判定と、種別に応じた報酬額の追記・処理結果の保存を同じImmediateトランザクションで確定します。返信・リアクションの各受取人の判定は独立しています。
+`NotRepository.grant_reward(actor, reason, request_id, now)` は付与済みの取引を `Some(LedgerEntry)`、制限による見送りを `None` で返します。キーは `reward:{理由コード}:{元メッセージID}`、リアクションの場合は `reward:{理由コード}:{元メッセージID}-{リアクションした人のID}` です。絵文字はキーに含めず、取り外し・付け直し・別絵文字でも同じ結果を返します。日次上限・間隔・残高上限・処理済み判定と、種別に応じた報酬額の追記・処理結果の保存を同じImmediateトランザクションで確定します。返信・リアクションの各受取人の判定は独立しています。
 
 Gatewayは `GUILDS | DIRECT_MESSAGES | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS | GUILD_VOICE_STATES` を使います。Botには対象チャンネルの閲覧と「メッセージ履歴を読む」を許可してください。リアクション先、イベントに参照元がない返信先はRESTで取得します。取得できない場合は付与せずエラーを記録します。Message Content・Guild MembersなどのPrivileged Gateway Intentsは不要です。[イベントとIntent](https://docs.discord.com/developers/events/gateway#list-of-intents)、[通話状態のイベント](https://docs.discord.com/developers/events/gateway-events#voice-state-update)
 
-`NotUseCase.grant_voice_reward(actor, earned_at)` は確認済みの通話1分へ1 NOTを付与します。既存の `ADJUSTMENT` 履歴と `voice:{日本時間の日番号}:{ユーザーID}:{Unix分}` キーを使い、同じ分の復元・当日300回の上限・残高検証・追記を同じImmediateトランザクションで行います。表・依存・スキーマの追加はありません。付与結果が不明な場合は獲得時刻を保持し、翌分になっても同じキーで照合します。履歴の理由表示は既存の「管理者による残高調整」を共用し、`voice:` で通話報酬を識別します。
+`NotRepository.grant_voice_reward(actor, earned_at)` は確認済みの通話1分へ1 NOTを付与します。既存の `ADJUSTMENT` 履歴と `voice:{日本時間の日番号}:{ユーザーID}:{Unix分}` キーを使い、同じ分の復元・当日300回の上限・残高検証・追記を同じImmediateトランザクションで行います。表・依存・スキーマの追加はありません。付与結果が不明な場合は獲得時刻を保持し、翌分になっても同じキーで照合します。履歴の理由表示は既存の「管理者による残高調整」を共用し、`voice:` で通話報酬を識別します。
 
 自動検証では既存の実SQLite・ローカルHTTPのテストで、正負・0の調整、過大減算・整数上限超過、管理権限・対象所属、指定額の異なる依頼ID再利用、同時再試行、INSERT／COMMIT失敗時の取消、購入・返金・譲渡との残高競合を確認しています。実Discordでのコマンド反映・譲渡・増減指定・退会後の拒否は未確認です。テスト用サーバーで正の調整による加算、`amount:-100` による減算、残高50への `-100` の拒否と `-50` による0への減算、一般ユーザーの拒否を確認してください。
 
@@ -188,13 +188,13 @@ P08の実機確認は未実施です。テストギルドとBotとのDMで次を
 - 公開だけを失敗させた後に、権限を戻して「再投稿する」で同じ商品を公開できること。
 - 上限サイズの添付を保持でき、公開メッセージにファイル本体・保存先・元URLが含まれないこと。
 
-`infrastructure::discord::content::store_content` に保存先、認証済みの `Actor`、Botが発行した出品操作ID、元ファイル名、`Read` を渡して保存します。戻り値の `StoredContent` と `ItemDetails` を `infrastructure::sqlite::shop::ShopUseCase::create` に渡すと、ファイル情報・商品・初版を同じトランザクションで確定します。未保存の `ContentFile` だけから商品を作る入口はありません。
+保存先を渡して `infrastructure::discord::shop::ShopRepository::new(directory)` を作り、`store_content` に認証済みの `Actor`、Botが発行した出品操作ID、元ファイル名、`Read` を渡して保存します。commandsが戻り値の `domain::StoredContent` と `ItemDetails` を `infrastructure::sqlite::shop::ShopRepository::create` に渡すと、ファイル情報・商品・初版を同じトランザクションで確定します。未保存の `ContentFile` だけから商品を作る入口はありません。
 
 1商品1ファイル、正のサイズから20 MiBまでを受け付けます。Discordの既定のファイル上限に合わせ、25 MiBの送信リクエスト上限内にメタデータ用の余地を残します。元ファイル名はUTF-8で255バイト以内とし、保存パスには使いません。[Discordのファイル仕様](https://docs.discord.com/developers/reference#uploading-files)、[送信リクエスト上限](https://docs.discord.com/developers/resources/message#create-message)
 
 保存先はBot専用の非公開な永続ディスクを指定してください。キーは `content-{guild_id}-{user_id}-{request_id}` で、操作IDは1〜128文字のASCII英数字・ハイフン・アンダースコアに限定します。同じ下書きの再試行ではIDを変えません。同じキーに別の内容が来た場合や、既存の保存先がシンボリックリンクの場合は拒否します。同期I/Oなので、非同期のイベント処理からは `spawn_blocking` で呼び、DBセッションを保持したまま呼ばないでください。
 
-`ShopUseCase::find` と `list` は対象ギルドの販売中の商品を返します。`update(actor, item_id, expected_revision, details)` と `delete(actor, item_id, expected_revision)` は出品者本人だけが実行でき、履歴の新版をINSERTします。出品者・ギルド・ファイルは変えません。作成の再試行は初版の内容と照合して現在の商品を返し、変更の再試行は期待する次の版と同じ内容ならその版を返します。異なる内容や版の競合は拒否します。削除済みへの新しい変更は拒否し、削除の再試行は成功として扱います。
+`ShopRepository::find` と `list` は対象ギルドの販売中の商品を返します。`update(actor, item_id, expected_revision, details)` と `delete(actor, item_id, expected_revision)` は出品者本人だけが実行でき、履歴の新版をINSERTします。出品者・ギルド・ファイルは変えません。作成の再試行は初版の内容と照合して現在の商品を返し、変更の再試行は期待する次の版と同じ内容ならその版を返します。異なる内容や版の競合は拒否します。削除済みへの新しい変更は拒否し、削除の再試行は成功として扱います。
 
 商品削除やDB確定エラーでも完成ファイルは保持します。DB結果が不明な場合も同じ操作IDで再試行し、ファイルを消さないでください。確定されなかった完成ファイルや、プロセス強制終了時の `.pending-*` の自動削除は行いません。実Discordからの添付取得・公開はP08、購入後のDM配送はP09で接続済みです。
 
@@ -219,7 +219,7 @@ P09の実機確認は未実施です。出品者・購入者とテストギル�
 - 決済後のDM拒否を解消し、再起動後の元の確認・購入一覧・無料再送で追加課金なく受け取れること。
 - 商品削除後の再送、返金後・別人への再送拒否、上限サイズのDM配送、購入一覧のページ切替。
 
-`ShopUseCase::prepare_purchase(actor, item_id, request_id, now)` は、本人・ギルドに結び付いた5分間の `PurchaseQuote` を返します。`item()` に確認時の商品版と価格を保持し、確認発行では課金しません。確認IDはBot側で発行し、同じ確認の再試行では変更しません。
+`ShopRepository::prepare_purchase(actor, item_id, request_id, now)` は、本人・ギルドに結び付いた5分間の `PurchaseQuote` を返します。`item()` に確認時の商品版と価格を保持し、確認発行では課金しません。確認IDはBot側で発行し、同じ確認の再試行では変更しません。
 
 `purchase(actor, &quote, now)` は、同じ確認IDで確定済みかを先に照合します。初回だけ期限、最新の版・価格、販売状態、コンテンツの自己購入・購入済み、残高を検証してImmediateトランザクションで確定します。コンテンツは購入者の減算と出品者の加算を一括記録します。ロールは購入者の減算だけです。価格を元に戻しても版が変わっていれば再確認が必要です。
 
@@ -232,7 +232,7 @@ P09の実機確認は未実施です。出品者・購入者とテストギル�
 - `find_purchase_by_confirmation(actor, confirmation_id)`：本人・対象ギルドの領収結果を復元します。未処理なら `None`。返金済みでも元の取引を返し、課金行を増やしません。
 - `list_purchases(actor)`：本人の未返金購入を購入IDの降順で返します。既存の `PurchaseResult` を使い、商品変更・削除後も一覧に含めます。
 - `get_content_for_purchase(actor, purchase_id)`：購入者・ギルドと購入／売上／返金の整合性を照合し、配送用の `ContentFile` を返します。購入IDには `PurchaseResult::buyer().id()` を使います。返金済み・別人には取得を許可しません。
-- `refund(actor, purchase_id, request_id)`：NOT管理権限を持つ実行者だけが元の購入額を返金します。元の売上がある場合だけ売上取消も一括追記します。`TradeResult::buyer()` は返金取引、`seller()` は売上取消がある場合の `Some`、なければ `None` です。
+- `refund(actor, purchase_id, request_id)`：NOT管理権限を持つ実行者だけが元の購入額を返金します。元の売上がある場合だけ売上取消も一括追記します。`RefundResult::buyer()` は返金取引、`seller()` は売上取消がある場合の `Some`、なければ `None` です。
 
 返金キーは `refund:{request_id}:buyer`・`refund:{request_id}:seller`。売上なしのロール購入には購入者側だけを記録します。同じ依頼ID・購入の再試行は、残高が後から変わっても元の結果を返します。同じIDを別購入に使うと `RequestConflict`、別IDによる二重返金は `AlreadyRefunded` です。購入者の残高上限超過・途中のSQL失敗、売上取消がある場合の出品者の残高不足では、全体を取り消します。
 
@@ -366,7 +366,7 @@ cp -a data "$notbot_backup/data"
 
 ## 設計と実装手順
 
-コードもドメイン層（共通型・値の不変条件）とインフラ層（変換・検証・操作・I/O）の2層へ整理しています。共通型は `domain::`、操作・DB・Discord・ファイル処理は `infrastructure::` を使います。旧 `application::` とDB向けTrait・型引数は削除しました。インフラ内は `sqlite/` にDBと操作処理、`discord/` にPoiseのコマンド・イベント・認証・ファイル保存をまとめています。配置は[アーキテクチャ設計](design/ARCHITECTURE.md)を参照してください。
+コードもドメイン層（検証済みデータの保持）とインフラ層（変換・検証・操作・I/O）の2層へ整理しています。共通型は `domain::`、操作・DB・Discord・ファイル処理は `infrastructure::` を使います。旧 `application::` とDB向けTrait・型引数は削除しました。インフラ内は `sqlite/` にDBと操作処理、`discord/` にPoiseのコマンド・イベント・認証・ファイル保存をまとめています。各Repositoryは相互に参照せず、commands／eventsがドメイン値を受け渡します。Discordの返信・対話・ロール操作はcommands、Gateway処理はeventsに置きます。配置は[アーキテクチャ設計](design/ARCHITECTURE.md)を参照してください。
 
 - [実装手順とCodexへの依頼文](design/IMPLEMENTATION.md)
 - [コンテンツ売買のレビューと操作フロー](design/CONTENT.md)

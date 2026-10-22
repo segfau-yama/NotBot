@@ -1,23 +1,22 @@
+use crate::infrastructure::types as values;
+use sea_orm::QueryResult;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::domain::{
-    Actor, Balance, LedgerEntry, LedgerReason, NewLedgerEntry, NotAmount, UserBalance, UserId,
-    validate_event_key,
-};
+use crate::domain::{Actor, Balance, LedgerEntry, LedgerReason, NotAmount, UserBalance, UserId};
 
-use super::SqliteDatabaseAccess;
-use crate::infrastructure::UseCaseError;
+use super::{DatabaseError, SqliteDatabaseAccess};
+use crate::infrastructure::RepositoryError;
 
-pub struct NotUseCase {
+pub struct NotRepository {
     database: SqliteDatabaseAccess,
 }
 
-impl NotUseCase {
+impl NotRepository {
     pub fn new(database: SqliteDatabaseAccess) -> Self {
         Self { database }
     }
 
-    pub async fn get_balance(&self, actor: Actor) -> Result<Balance, UseCaseError> {
+    pub async fn get_balance(&self, actor: Actor) -> Result<Balance, RepositoryError> {
         let mut session = self.database.begin_read().await?;
         let balance = session
             .get_balance(actor.guild_id(), actor.user_id())
@@ -30,7 +29,7 @@ impl NotUseCase {
         &self,
         actor: Actor,
         limit: u32,
-    ) -> Result<Vec<UserBalance>, UseCaseError> {
+    ) -> Result<Vec<UserBalance>, RepositoryError> {
         let mut session = self.database.begin_read().await?;
         let ranking = session.get_ranking(actor.guild_id(), limit).await?;
         session.commit().await?;
@@ -44,11 +43,11 @@ impl NotUseCase {
         user_id: UserId,
         amount: NotAmount,
         request_id: &str,
-    ) -> Result<LedgerEntry, UseCaseError> {
+    ) -> Result<LedgerEntry, RepositoryError> {
         if !actor.can_manage_not() {
-            return Err(UseCaseError::PermissionDenied);
+            return Err(RepositoryError::PermissionDenied);
         }
-        validate_event_key(request_id)?;
+        values::validate_event_key(request_id)?;
         let event_key = format!("adjust-amount:{request_id}");
         let mut session = self.database.begin_write().await?;
         if let Some(existing) = session
@@ -59,15 +58,15 @@ impl NotUseCase {
                 || existing.reason() != LedgerReason::Adjustment
                 || existing.amount() != amount
             {
-                return Err(UseCaseError::RequestConflict);
+                return Err(RepositoryError::RequestConflict);
             }
             session.commit().await?;
             return Ok(existing);
         }
         let balance = session.get_balance(actor.guild_id(), user_id).await?;
-        balance.apply(amount)?;
+        values::apply_balance(balance, amount)?;
         let entry = session
-            .append_entry(NewLedgerEntry::try_new(
+            .append_entry(values::new_ledger_entry(
                 actor.guild_id(),
                 user_id,
                 amount,
@@ -84,13 +83,13 @@ impl NotUseCase {
         &self,
         actor: Actor,
         earned_at: SystemTime,
-    ) -> Result<Option<LedgerEntry>, UseCaseError> {
+    ) -> Result<Option<LedgerEntry>, RepositoryError> {
         let minute = earned_at
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_secs() / 60).ok())
             .filter(|minute| minute.checked_add(540).is_some())
-            .ok_or(UseCaseError::InvalidRewardTime)?;
+            .ok_or(RepositoryError::InvalidRewardTime)?;
         let day = (minute + 540) / 1440;
         let prefix = format!("voice:{day}:{}:", actor.user_id());
         let key = format!("{prefix}{minute}");
@@ -100,7 +99,7 @@ impl NotUseCase {
                 || entry.reason() != LedgerReason::Adjustment
                 || entry.amount().get() != 1
             {
-                return Err(UseCaseError::RequestConflict);
+                return Err(RepositoryError::RequestConflict);
             }
             session.commit().await?;
             return Ok(Some(entry));
@@ -109,14 +108,16 @@ impl NotUseCase {
             session.commit().await?;
             return Ok(None);
         }
-        let amount = NotAmount::new(1);
-        session
-            .get_balance(actor.guild_id(), actor.user_id())
-            .await?
-            .apply(amount)?;
+        let amount = values::amount(1);
+        values::apply_balance(
+            session
+                .get_balance(actor.guild_id(), actor.user_id())
+                .await?,
+            amount,
+        )?;
         // shortcut: 通話はADJUSTMENTとvoice:キーで記録する。専用の理由表示が必要ならDB制約も移行する。
         let entry = session
-            .append_entry(NewLedgerEntry::try_new(
+            .append_entry(values::new_ledger_entry(
                 actor.guild_id(),
                 actor.user_id(),
                 amount,
@@ -135,20 +136,20 @@ impl NotUseCase {
         reason: LedgerReason,
         request_id: &str,
         now: SystemTime,
-    ) -> Result<Option<LedgerEntry>, UseCaseError> {
-        let amount = NotAmount::new(match reason {
+    ) -> Result<Option<LedgerEntry>, RepositoryError> {
+        let amount = values::amount(match reason {
             LedgerReason::Message => 5,
             LedgerReason::Reaction => 1,
             LedgerReason::ReactionReceived => 10,
             LedgerReason::ReplyReceived => 20,
-            _ => return Err(UseCaseError::InvalidRewardReason),
+            _ => return Err(RepositoryError::InvalidRewardReason),
         });
-        validate_event_key(request_id)?;
-        let key = format!("reward:{}:{request_id}", reason.code());
+        values::validate_event_key(request_id)?;
+        let key = format!("reward:{}:{request_id}", values::reason_code(reason));
         let mut session = self.database.begin_write().await?;
         if let Some((user, saved_reason, entry)) = session.find_reward_event(actor, &key).await? {
-            if user != actor.user_id() || saved_reason != reason.code() {
-                return Err(UseCaseError::RequestConflict);
+            if user != actor.user_id() || saved_reason != values::reason_code(reason) {
+                return Err(RepositoryError::RequestConflict);
             }
             let entry = match entry {
                 Some(id) => {
@@ -176,15 +177,17 @@ impl NotUseCase {
             .ok()
             .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
             .filter(|now| now.checked_add(32_400_000 + 86_400_000).is_some())
-            .ok_or(UseCaseError::InvalidRewardTime)?;
+            .ok_or(RepositoryError::InvalidRewardTime)?;
         let entry = if session.reward_allowed(actor, reason, now).await? {
-            session
-                .get_balance(actor.guild_id(), actor.user_id())
-                .await?
-                .apply(amount)?;
+            values::apply_balance(
+                session
+                    .get_balance(actor.guild_id(), actor.user_id())
+                    .await?,
+                amount,
+            )?;
             Some(
                 session
-                    .append_entry(NewLedgerEntry::try_new(
+                    .append_entry(values::new_ledger_entry(
                         actor.guild_id(),
                         actor.user_id(),
                         amount,
@@ -216,14 +219,14 @@ impl NotUseCase {
         recipient: UserId,
         amount: i64,
         request_id: &str,
-    ) -> Result<(LedgerEntry, LedgerEntry), UseCaseError> {
+    ) -> Result<(LedgerEntry, LedgerEntry), RepositoryError> {
         if actor.user_id() == recipient {
-            return Err(UseCaseError::SelfTransfer);
+            return Err(RepositoryError::SelfTransfer);
         }
         if !matches!(amount, 100 | 500 | 1000) {
-            return Err(UseCaseError::InvalidTransferAmount);
+            return Err(RepositoryError::InvalidTransferAmount);
         }
-        validate_event_key(request_id)?;
+        values::validate_event_key(request_id)?;
         let sent_key = format!("transfer:{request_id}:sent");
         let received_key = format!("transfer:{request_id}:received");
         let mut session = self.database.begin_write().await?;
@@ -242,7 +245,7 @@ impl NotUseCase {
                     || sent.amount().get() != -amount
                     || received.amount().get() != amount
                 {
-                    return Err(UseCaseError::RequestConflict);
+                    return Err(RepositoryError::RequestConflict);
                 }
                 session.commit().await?;
                 return Ok((sent, received));
@@ -254,26 +257,26 @@ impl NotUseCase {
             .get_balance(actor.guild_id(), actor.user_id())
             .await?;
         if sender_balance.get() < amount {
-            return Err(UseCaseError::InsufficientBalance);
+            return Err(RepositoryError::InsufficientBalance);
         }
-        session
-            .get_balance(actor.guild_id(), recipient)
-            .await?
-            .apply(NotAmount::new(amount))?;
+        values::apply_balance(
+            session.get_balance(actor.guild_id(), recipient).await?,
+            values::amount(amount),
+        )?;
         let sent = session
-            .append_entry(NewLedgerEntry::try_new(
+            .append_entry(values::new_ledger_entry(
                 actor.guild_id(),
                 actor.user_id(),
-                NotAmount::new(-amount),
+                values::amount(-amount),
                 LedgerReason::TipSent,
                 sent_key,
             )?)
             .await?;
         let received = session
-            .append_entry(NewLedgerEntry::try_new(
+            .append_entry(values::new_ledger_entry(
                 actor.guild_id(),
                 recipient,
-                NotAmount::new(amount),
+                values::amount(amount),
                 LedgerReason::TipReceived,
                 received_key,
             )?)
@@ -289,11 +292,11 @@ impl NotUseCase {
         user_id: UserId,
         target_balance: Balance,
         request_id: &str,
-    ) -> Result<LedgerEntry, UseCaseError> {
+    ) -> Result<LedgerEntry, RepositoryError> {
         if !actor.can_manage_not() {
-            return Err(UseCaseError::PermissionDenied);
+            return Err(RepositoryError::PermissionDenied);
         }
-        validate_event_key(request_id)?;
+        values::validate_event_key(request_id)?;
         let event_key = format!("adjust:{request_id}");
         let mut session = self.database.begin_write().await?;
         if let Some(existing) = session
@@ -304,21 +307,23 @@ impl NotUseCase {
                 || existing.user_id() != user_id
                 || existing.reason() != LedgerReason::Adjustment
             {
-                return Err(UseCaseError::RequestConflict);
+                return Err(RepositoryError::RequestConflict);
             }
             let original_target = session
                 .get_balance_at_entry(actor.guild_id(), user_id, existing.id())
                 .await?;
             if original_target != target_balance {
-                return Err(UseCaseError::RequestConflict);
+                return Err(RepositoryError::RequestConflict);
             }
             session.commit().await?;
             return Ok(existing);
         }
         let current = session.get_balance(actor.guild_id(), user_id).await?;
-        let amount =
-            NotAmount::new(target_balance.get()).checked_sub(NotAmount::new(current.get()))?;
-        let entry = NewLedgerEntry::try_new(
+        let amount = values::checked_sub(
+            values::amount(target_balance.get()),
+            values::amount(current.get()),
+        )?;
+        let entry = values::new_ledger_entry(
             actor.guild_id(),
             user_id,
             amount,
@@ -330,3 +335,45 @@ impl NotUseCase {
         Ok(entry)
     }
 }
+
+impl NotRepository {
+    pub(super) fn read_entry(row: QueryResult) -> Result<LedgerEntry, DatabaseError> {
+        let id: i64 = row.try_get("", "id")?;
+        let guild: String = row.try_get("", "guild_id")?;
+        let user: String = row.try_get("", "user_id")?;
+        let amount: i64 = row.try_get("", "amount")?;
+        let code: String = row.try_get("", "reason")?;
+        let key: String = row.try_get("", "event_key")?;
+        let item: Option<i64> = row.try_get("", "item_id")?;
+        let sale: Option<i64> = row.try_get("", "sale_of")?;
+        let refund: Option<i64> = row.try_get("", "refund_of")?;
+        let reason = match (code.as_str(), item, sale, refund) {
+            ("MESSAGE", None, None, None) => LedgerReason::Message,
+            ("REACTION", None, None, None) => LedgerReason::Reaction,
+            ("REACTION_RECEIVED", None, None, None) => LedgerReason::ReactionReceived,
+            ("REPLY_RECEIVED", None, None, None) => LedgerReason::ReplyReceived,
+            ("TIP_SENT", None, None, None) => LedgerReason::TipSent,
+            ("TIP_RECEIVED", None, None, None) => LedgerReason::TipReceived,
+            ("TIMEOUT", None, None, None) => LedgerReason::Timeout,
+            ("ADJUSTMENT", None, None, None) => LedgerReason::Adjustment,
+            ("PURCHASE", Some(id), None, None) => LedgerReason::Purchase(values::item_id(id)?),
+            ("SALE", None, Some(id), None) => LedgerReason::Sale(values::ledger_entry_id(id)?),
+            ("REFUND", None, None, Some(id)) => LedgerReason::Refund(values::ledger_entry_id(id)?),
+            ("SALE_REFUND", None, None, Some(id)) => {
+                LedgerReason::SaleRefund(values::ledger_entry_id(id)?)
+            }
+            _ => return Err(DatabaseError::InvalidData),
+        };
+        values::ledger_entry(
+            values::ledger_entry_id(id)?,
+            values::parse_guild_id(&guild)?,
+            values::parse_user_id(&user)?,
+            values::amount(amount),
+            reason,
+            key,
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl NotRepository {}

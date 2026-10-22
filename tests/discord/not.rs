@@ -1,14 +1,13 @@
+use crate::infrastructure::discord::not::NotRepository as DiscordNotRepository;
+use crate::infrastructure::types as values;
 use std::sync::atomic::Ordering;
 
 use serenity::json::to_value;
 
 use super::*;
-use crate::{
-    domain::Balance,
-    infrastructure::{
-        UseCaseError,
-        discord::{commands, events, test_support::*},
-    },
+use crate::infrastructure::{
+    RepositoryError,
+    discord::{commands, events, test_support::*},
 };
 
 #[tokio::test]
@@ -17,93 +16,114 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
     let data = setup(&directory).await;
     let mock = MockDiscord::new();
     let http = mock.http();
-    let a = target_guild(Some(GuildId::new(100)), None).unwrap();
-    let b = target_guild(None, Some("101")).unwrap();
-    let admin = authenticate(&http, a, UserId::new(999)).await.unwrap();
-    let viewer = authenticate(&http, a, UserId::new(200)).await.unwrap();
-    let other_guild_viewer = authenticate(&http, b, UserId::new(200)).await.unwrap();
-    let target = adjustment_target(&http, admin, UserId::new(200))
+    let a = DiscordNotRepository::target_guild(Some(GuildId::new(100)), None).unwrap();
+    let b = DiscordNotRepository::target_guild(None, Some("101")).unwrap();
+    let admin = DiscordNotRepository::new(&http)
+        .authenticate(a, UserId::new(999))
         .await
         .unwrap();
-    let balance = parse_balance("1200").unwrap();
+    let viewer = DiscordNotRepository::new(&http)
+        .authenticate(a, UserId::new(200))
+        .await
+        .unwrap();
+    let other_guild_viewer = DiscordNotRepository::new(&http)
+        .authenticate(b, UserId::new(200))
+        .await
+        .unwrap();
+    let target = DiscordNotRepository::new(&http)
+        .adjustment_target(admin, UserId::new(200))
+        .await
+        .unwrap();
+    let balance = values::parse_balance("1200").unwrap();
     let entry = data
-        .not
+        .sqlite_not
         .adjust_balance(admin, target, balance, "interaction-700")
         .await
         .unwrap();
     assert_eq!(
-        data.not
+        data.sqlite_not
             .adjust_balance(admin, target, balance, "interaction-700")
             .await
             .unwrap(),
         entry
     );
-    assert_eq!(data.not.get_balance(viewer).await.unwrap(), balance);
-    let dm = authenticate(
-        &http,
-        target_guild(None, Some("100")).unwrap(),
-        UserId::new(200),
-    )
-    .await
-    .unwrap();
-    assert_eq!(data.not.get_balance(dm).await.unwrap(), balance);
+    assert_eq!(data.sqlite_not.get_balance(viewer).await.unwrap(), balance);
+    let dm = DiscordNotRepository::new(&http)
+        .authenticate(
+            DiscordNotRepository::target_guild(None, Some("100")).unwrap(),
+            UserId::new(200),
+        )
+        .await
+        .unwrap();
+    assert_eq!(data.sqlite_not.get_balance(dm).await.unwrap(), balance);
     assert_eq!(
-        data.not.get_balance(other_guild_viewer).await.unwrap(),
-        Balance::try_from(0).unwrap()
+        data.sqlite_not
+            .get_balance(other_guild_viewer)
+            .await
+            .unwrap(),
+        values::balance(0).unwrap()
     );
     assert_eq!(
-        data.not.get_ranking(viewer, 10).await.unwrap()[0].user_id(),
+        data.sqlite_not.get_ranking(viewer, 10).await.unwrap()[0].user_id(),
         target
     );
     assert!(
-        data.not
+        data.sqlite_not
             .get_ranking(other_guild_viewer, 10)
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        adjustment_target(&http, viewer, UserId::new(200))
+        DiscordNotRepository::new(&http)
+            .adjustment_target(viewer, UserId::new(200))
             .await
             .is_err()
     );
     assert_eq!(
-        data.not
+        data.sqlite_not
             .adjust_balance(viewer, target, balance, "forbidden")
             .await,
-        Err(UseCaseError::PermissionDenied)
+        Err(RepositoryError::PermissionDenied)
     );
     let mut guild = http.get_guild(a).await.unwrap();
     let member = http.get_member(a, UserId::new(200)).await.unwrap();
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::MANAGE_GUILD;
     assert!(
-        !authenticated_actor(&guild, &member, member.user.id)
+        !DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::ADMINISTRATOR;
     assert!(
-        authenticated_actor(&guild, &member, member.user.id)
+        DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
     guild.roles.get_mut(&RoleId::new(100)).unwrap().permissions = Permissions::empty();
     assert!(
-        !authenticated_actor(&guild, &member, member.user.id)
+        !DiscordNotRepository::authenticated_actor(&guild, &member, member.user.id)
             .unwrap()
             .can_manage_not()
     );
-    assert!(authenticated_actor(&guild, &member, UserId::new(201)).is_err());
+    assert!(DiscordNotRepository::authenticated_actor(&guild, &member, UserId::new(201)).is_err());
     mock.deny_member.store(true, Ordering::Relaxed);
-    assert!(authenticate(&http, a, UserId::new(200)).await.is_err());
     assert!(
-        adjustment_target(&http, admin, UserId::new(200))
+        DiscordNotRepository::new(&http)
+            .authenticate(a, UserId::new(200))
+            .await
+            .is_err()
+    );
+    assert!(
+        DiscordNotRepository::new(&http)
+            .adjustment_target(admin, UserId::new(200))
             .await
             .is_err()
     );
     mock.deny_member.store(false, Ordering::Relaxed);
     assert!(
-        authenticate(&http, GuildId::new(102), UserId::new(200))
+        DiscordNotRepository::new(&http)
+            .authenticate(GuildId::new(102), UserId::new(200))
             .await
             .is_err()
     );
@@ -112,19 +132,50 @@ async fn 所属と権限を確認した本人だけが対象サーバーの残�
 
 #[test]
 fn サーバー内から別サーバーは指定できず個別の会話では指定が必要である() {
-    assert!(target_guild(None, None).is_err());
-    assert!(target_guild(Some(GuildId::new(100)), Some("101")).is_err());
-    assert!(target_guild(None, Some("0")).is_err());
+    assert!(DiscordNotRepository::target_guild(None, None).is_err());
+    assert!(DiscordNotRepository::target_guild(Some(GuildId::new(100)), Some("101")).is_err());
+    assert!(DiscordNotRepository::target_guild(None, Some("0")).is_err());
 }
 
 #[test]
 fn 残高の入力は64ビットの非負整数に限る() {
     assert_eq!(
-        parse_balance("9223372036854775807").unwrap().get(),
+        values::parse_balance("9223372036854775807").unwrap().get(),
         i64::MAX
     );
     for value in ["", "-1", "1.0", "1e3", "１２", "9223372036854775808"] {
-        assert!(parse_balance(value).is_err(), "{value}");
+        assert!(values::parse_balance(value).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn 増減額の入力は符号付き六十四ビット整数として検証する() {
+    for (input, expected) in [
+        ("-9223372036854775808", i64::MIN),
+        ("9223372036854775807", i64::MAX),
+        ("0", 0),
+        ("+500", 500),
+        ("-500", -500),
+    ] {
+        assert_eq!(
+            DiscordNotRepository::parse_amount(input).unwrap().get(),
+            expected
+        );
+    }
+    for input in [
+        "",
+        " 1",
+        "1 ",
+        "1.0",
+        "1e3",
+        "１２",
+        "9223372036854775808",
+        "-9223372036854775809",
+    ] {
+        assert!(
+            DiscordNotRepository::parse_amount(input).is_err(),
+            "{input}"
+        );
     }
 }
 
@@ -179,7 +230,7 @@ async fn 返信には外部エラーの秘密情報を含めず業務エラー�
     assert!(!public.contains("unknown-route"));
     assert!(!public.contains(&mock.address));
     assert!(!public.contains("offline-secret-interaction-token"));
-    let internal: Error = crate::infrastructure::UseCaseError::PermissionDenied.into();
+    let internal: Error = crate::infrastructure::RepositoryError::PermissionDenied.into();
     assert_eq!(
         events::public_error_message(&internal),
         "この操作を行う権限がありません"
